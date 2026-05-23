@@ -398,6 +398,14 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; colo
   font-size: 10px;
   opacity: 0.85;
 }
+.shift-note {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 10px;
+  opacity: 0.6;
+  cursor: help;
+  vertical-align: middle;
+}
 
 /* Split-block (night shift spanning midnight) */
 .shift-split-start {

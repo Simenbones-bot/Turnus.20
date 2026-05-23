@@ -229,11 +229,22 @@ function validateFATS() {
 
   weeks.forEach((week, wi) => {
     let weekTotal = 0;
-    // Rule 1: per-shift net > 600
+
+    // Add cross-week Monday contribution from previous week's Sunday shift
+    if (wi > 0 && weeks[wi - 1]) {
+      (weeks[wi - 1][6] || []).forEach(s => {
+        if (s.end > TIMELINE_END) {
+          weekTotal += splitShiftAcrossWeeks(s, 6).nextWeekNet;
+        }
+      });
+    }
+
+    // Rule 1: per-shift net > 600 min (uses total net)
     week.forEach((day, di) => {
       day.forEach((s, si) => {
         const net = shiftNet(s);
-        weekTotal += net;
+        const split = splitShiftAcrossWeeks(s, di);
+        weekTotal += split.currentWeekNet;
         if (net > 600) {
           const key = `${wi}-${di}-${si}`;
           result.shiftFlags[key] = 'broken';
@@ -245,7 +256,8 @@ function validateFATS() {
         }
       });
     });
-    // Rule 2: weekly net > 3600
+
+    // Rule 2: weekly net > 3600 min (uses per-week split portions)
     if (weekTotal > 3600) {
       result.weekFlags[wi] = 'broken';
       result.broken.push({
@@ -253,25 +265,22 @@ function validateFATS() {
         rule: 'week-60h',
         text: `Sum uke ${weekMeta[wi].num}: ${(weekTotal / 60).toFixed(1)} t (over 60 t)`,
       });
-      // mark all shifts in this week
       week.forEach((day, di) => {
         day.forEach((_, si) => {
           result.shiftFlags[`${wi}-${di}-${si}`] = 'broken';
         });
       });
     }
-    // Rule 3: rest >= 660 between consecutive days
+
+    // Rule 3: rest >= 660 between consecutive days (within week)
     for (let di = 1; di < 7; di++) {
       if (!week[di].length) continue;
-      // find latest end on previous day
       const prev = week[di - 1];
       if (!prev.length) continue;
       const lastEnd = Math.max(...prev.map(x => x.end));
       const firstStart = Math.min(...week[di].map(x => x.start));
-      // gap in minutes: (di * 1440 + firstStart) - ((di-1)*1440 + lastEnd) = 1440 + firstStart - lastEnd
       const gap = 1440 + firstStart - lastEnd;
       if (gap < 660) {
-        // mark first shift on di (the one with the earliest start)
         const earliestIdx = week[di].reduce((acc, s, i, arr) => s.start < arr[acc].start ? i : acc, 0);
         result.shiftFlags[`${wi}-${di}-${earliestIdx}`] = 'broken';
         result.broken.push({
@@ -281,12 +290,43 @@ function validateFATS() {
         });
       }
     }
+
+    // Rule 3 cross-week: prev Sunday shift end vs this week's Monday
+    if (wi > 0 && weeks[wi - 1]) {
+      (weeks[wi - 1][6] || []).forEach(s => {
+        if (s.end > TIMELINE_END && week[0].length > 0) {
+          const contEnd = s.end - TIMELINE_END;
+          const firstStart = Math.min(...week[0].map(x => x.start));
+          const gap = firstStart - contEnd;
+          if (gap < 660) {
+            const earliestIdx = week[0].reduce((acc, sh, i, arr) => sh.start < arr[acc].start ? i : acc, 0);
+            result.shiftFlags[`${wi}-0-${earliestIdx}`] = 'broken';
+            result.broken.push({
+              week: wi, dayIdx: 0,
+              rule: 'rest-11h',
+              text: `Hviletid mellom Søn (uke ${weekMeta[wi-1].num}) og Man er ${(gap / 60).toFixed(1)} t`,
+            });
+          }
+        }
+      });
+    }
+
     // Rule 4: largest gap in week >= 1440
-    // Build all "absolute" minute pairs (di*1440 + start, di*1440 + end)
     const all = [];
     week.forEach((day, di) => {
-      day.forEach(s => all.push({ s: di * 1440 + s.start, e: di * 1440 + s.end }));
+      day.forEach(s => {
+        const absStart = di * 1440 + s.start;
+        const absEnd = isSundayCrossWeek(s, di)
+          ? 6 * 1440 + TIMELINE_END
+          : di * 1440 + s.end;
+        all.push({ s: absStart, e: absEnd });
+      });
     });
+    if (wi > 0 && weeks[wi - 1]) {
+      (weeks[wi - 1][6] || []).forEach(s => {
+        if (s.end > TIMELINE_END) all.push({ s: 0, e: s.end - TIMELINE_END });
+      });
+    }
     if (all.length >= 2) {
       all.sort((a, b) => a.s - b.s);
       let maxGap = 0;
@@ -708,16 +748,61 @@ function renderDetailList() {
   const week = weeks[activeWeek] || emptyWeek();
   const rows = [];
   let total = 0;
-  for (let di = 0; di < 7; di++) {
-    week[di].forEach((s, si) => {
-      const gross = shiftGross(s);
-      const lunch = lunchMinutes(gross);
-      const net = gross - lunch;
-      total += net;
-      const broken = fatsResult.shiftFlags[`${activeWeek}-${di}-${si}`] === 'broken';
-      rows.push({ di, si, s, lunch, net, broken, isSplit: s.end > TIMELINE_END });
+
+  // Cross-week continuation from previous week's Sunday
+  if (activeWeek > 0 && weeks[activeWeek - 1]) {
+    (weeks[activeWeek - 1][6] || []).forEach((s, si) => {
+      if (s.end > TIMELINE_END) {
+        const split = splitShiftAcrossWeeks(s, 6);
+        total += split.nextWeekNet;
+        const broken = fatsResult.shiftFlags[`${activeWeek - 1}-6-${si}`] === 'broken';
+        const prevUkeNum = weekMeta[activeWeek - 1] ? weekMeta[activeWeek - 1].num : '?';
+        rows.push({
+          dayLabel: `${DAY_NAMES[6]}–${DAY_NAMES[0]}`,
+          startLabel: minutesToHHMM(s.start),
+          endLabel: minutesToHHMM(s.end),
+          lunch: split.nextWeekLunch,
+          net: split.nextWeekNet,
+          broken,
+          note: `Fra uke ${prevUkeNum}`,
+          delKey: null,
+          crossWeekSi: si,
+          crossWeekOrigin: activeWeek - 1,
+        });
+      }
     });
   }
+
+  for (let di = 0; di < 7; di++) {
+    week[di].forEach((s, si) => {
+      const split = splitShiftAcrossWeeks(s, di);
+      total += split.currentWeekNet;
+      const broken = fatsResult.shiftFlags[`${activeWeek}-${di}-${si}`] === 'broken';
+      const isSundayCW = isSundayCrossWeek(s, di);
+      let dayLabel;
+      if (isSundayCW) {
+        dayLabel = `${DAY_NAMES[6]}–${DAY_NAMES[0]}`;
+      } else if (s.end > TIMELINE_END && di + 1 < 7) {
+        dayLabel = `${DAY_NAMES[di]}–${DAY_NAMES[di + 1]}`;
+      } else {
+        dayLabel = DAY_NAMES[di];
+      }
+      const nextUkeNum = weekMeta[activeWeek + 1] ? weekMeta[activeWeek + 1].num : null;
+      rows.push({
+        dayLabel,
+        startLabel: minutesToHHMM(s.start),
+        endLabel: minutesToHHMM(s.end),
+        lunch: split.currentWeekLunch,
+        net: split.currentWeekNet,
+        broken,
+        note: isSundayCW && nextUkeNum ? `Fortsetter i uke ${nextUkeNum}` : null,
+        delKey: `${di}-${si}`,
+        crossWeekSi: null,
+        crossWeekOrigin: null,
+      });
+    });
+  }
+
   if (!rows.length) {
     root.innerHTML = `<div class="detail-empty">Ingen vakter denne uken. Klikk og dra på tidslinjen for å lage en.</div>`;
     return;
@@ -728,16 +813,17 @@ function renderDetailList() {
     </thead>
     <tbody>`;
   rows.forEach(r => {
-    const splitDayName = r.isSplit && r.di + 1 < 7
-      ? `${DAY_NAMES[r.di]}–${DAY_NAMES[r.di + 1]}`
-      : DAY_NAMES[r.di];
+    const noteHtml = r.note ? `<span class="shift-note" title="${r.note}">↕</span>` : '';
+    const delHtml = r.delKey
+      ? `<button class="delete-btn" data-del="${r.delKey}" aria-label="Slett vakt">×</button>`
+      : `<button class="delete-btn" data-del-cross="${r.crossWeekOrigin}-6-${r.crossWeekSi}" aria-label="Slett vakt">×</button>`;
     html += `<tr class="${r.broken ? 'row-broken' : ''}">
-      <td>${splitDayName}</td>
-      <td class="mono">${minutesToHHMM(r.s.start)}</td>
-      <td class="mono">${minutesToHHMM(r.s.end)}</td>
+      <td>${r.dayLabel}${noteHtml}</td>
+      <td class="mono">${r.startLabel}</td>
+      <td class="mono">${r.endLabel}</td>
       <td class="mono">${r.lunch} min</td>
       <td class="mono">${(r.net / 60).toFixed(2)} t</td>
-      <td><button class="delete-btn" data-del="${r.di}-${r.si}" aria-label="Slett vakt">×</button></td>
+      <td>${delHtml}</td>
     </tr>`;
   });
   html += `</tbody>
@@ -750,6 +836,14 @@ function renderDetailList() {
     btn.addEventListener('click', () => {
       const [di, si] = btn.dataset.del.split('-').map(Number);
       weeks[activeWeek][di].splice(si, 1);
+      scheduleSave();
+      renderAll();
+    });
+  });
+  root.querySelectorAll('[data-del-cross]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const [wi, di, si] = btn.dataset.delCross.split('-').map(Number);
+      if (weeks[wi] && weeks[wi][di]) weeks[wi][di].splice(si, 1);
       scheduleSave();
       renderAll();
     });
@@ -1255,22 +1349,51 @@ function generatePDF() {
     doc.setFont('helvetica', 'normal');
     let weekTotal = 0;
     let hasAny = false;
+    const footnotes = [];
+
+    // Cross-week continuation from prev week's Sunday
+    if (wi > 0 && weeks[wi - 1]) {
+      (weeks[wi - 1][6] || []).forEach(s => {
+        if (s.end > TIMELINE_END) {
+          hasAny = true;
+          if (y > pageH - 25) { doc.addPage(); y = margin; }
+          const split = splitShiftAcrossWeeks(s, 6);
+          weekTotal += split.nextWeekNet;
+          const prevUkeNum = weekMeta[wi - 1] ? weekMeta[wi - 1].num : '?';
+          const note = `* Fra uke ${prevUkeNum}`;
+          footnotes.push(note);
+          doc.text(`${DAY_NAMES[6]}–${DAY_NAMES[0]}*`, cols[0], y);
+          doc.text(minutesToHHMM(s.start), cols[1], y);
+          doc.text(minutesToHHMM(s.end), cols[2], y);
+          doc.text(`${split.nextWeekLunch} min`, cols[3], y);
+          doc.text(`${(split.nextWeekNet / 60).toFixed(2)} t`, cols[4], y);
+          y += 5;
+        }
+      });
+    }
+
     for (let di = 0; di < 7; di++) {
       week[di].forEach(s => {
         hasAny = true;
         if (y > pageH - 25) { doc.addPage(); y = margin; }
-        const gross = shiftGross(s);
-        const lunch = lunchMinutes(gross);
-        const net = gross - lunch;
-        weekTotal += net;
-        const pdfDayName = s.end > TIMELINE_END && di + 1 < 7
-          ? `${DAY_NAMES[di]}–${DAY_NAMES[di + 1]}`
-          : DAY_NAMES[di];
+        const split = splitShiftAcrossWeeks(s, di);
+        weekTotal += split.currentWeekNet;
+        const isSundayCW = isSundayCrossWeek(s, di);
+        let pdfDayName;
+        if (isSundayCW) {
+          pdfDayName = `${DAY_NAMES[6]}–${DAY_NAMES[0]}*`;
+          const nextUkeNum = weekMeta[wi + 1] ? weekMeta[wi + 1].num : '?';
+          footnotes.push(`* Fortsetter i uke ${nextUkeNum}`);
+        } else if (s.end > TIMELINE_END && di + 1 < 7) {
+          pdfDayName = `${DAY_NAMES[di]}–${DAY_NAMES[di + 1]}`;
+        } else {
+          pdfDayName = DAY_NAMES[di];
+        }
         doc.text(pdfDayName, cols[0], y);
         doc.text(minutesToHHMM(s.start), cols[1], y);
         doc.text(minutesToHHMM(s.end), cols[2], y);
-        doc.text(`${lunch} min`, cols[3], y);
-        doc.text(`${(net / 60).toFixed(2)} t`, cols[4], y);
+        doc.text(`${split.currentWeekLunch} min`, cols[3], y);
+        doc.text(`${(split.currentWeekNet / 60).toFixed(2)} t`, cols[4], y);
         y += 5;
       });
     }
@@ -1283,7 +1406,15 @@ function generatePDF() {
     doc.setFont('helvetica', 'bold');
     doc.text(`Sum uke: ${(weekTotal / 60).toFixed(2)} t`, cols[4] - 14, y + 2);
     doc.setFont('helvetica', 'normal');
-    y += 10;
+    y += 6;
+    if (footnotes.length > 0) {
+      doc.setFontSize(8);
+      doc.setTextColor(100, 116, 139);
+      [...new Set(footnotes)].forEach(fn => { doc.text(fn, margin, y); y += 4; });
+      doc.setFontSize(9);
+      doc.setTextColor(15, 23, 42);
+    }
+    y += 4;
   });
 
   // Tilleggsinformasjon
