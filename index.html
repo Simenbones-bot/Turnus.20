@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="nb">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Turnusgenerator – Drøftingsverktøy</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css?v=20260522" />
+</head>
+<body>
+
+<header class="top-header">
+  <div class="top-header-inner">
+    <span class="top-header-title">Turnusgenerator</span>
+    <span class="top-header-sub">Drøftingsverktøy</span>
+  </div>
+</header>
+
+<div id="restore-banner" class="restore-banner" hidden>
+  <span>Vi fant et lagret utkast fra <strong id="restore-time">–</strong>.</span>
+  <div class="restore-actions">
+    <button type="button" class="btn btn-primary btn-sm" id="restore-yes">Gjenopprett</button>
+    <button type="button" class="btn btn-outline btn-sm" id="restore-no">Forkast</button>
+  </div>
+</div>
+
+<main class="layout">
+  <div class="main-content">
+
+    <!-- SECTION 1 -->
+    <section class="card" id="section-info">
+      <header class="section-head">
+        <span class="section-num" id="info-num">1</span>
+        <div class="section-titles">
+          <h2>Informasjon</h2>
+          <p>Avdeling, leder og bakgrunn for endringen</p>
+        </div>
+        <span class="section-complete" id="info-complete" hidden>✓ Komplett</span>
+      </header>
+
+      <div class="form-grid">
+        <label class="field">
+          <span class="field-label">Avdeling</span>
+          <input type="text" id="f-avdeling" placeholder="Bergen Distribusjon" />
+          <span class="field-error" id="err-avdeling"></span>
+        </label>
+        <label class="field">
+          <span class="field-label">Avdelingsleder</span>
+          <input type="text" id="f-avdelingsleder" placeholder="Navn på leder" />
+          <span class="field-error" id="err-avdelingsleder"></span>
+        </label>
+
+        <label class="field">
+          <span class="field-label">Type turnus</span>
+          <select id="f-type">
+            <option value="Personlig">Personlig</option>
+            <option value="Flere">Turnus for flere sjåfører</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">Ikrafttredelsesdato</span>
+          <input type="date" id="f-ikraft" />
+          <span class="field-error" id="err-ikraft"></span>
+        </label>
+
+        <label class="field" id="wrap-navn">
+          <span class="field-label">Sjåfør / navn</span>
+          <input type="text" id="f-navn" placeholder="Navn på sjåfør" />
+        </label>
+        <label class="field" id="wrap-antall" hidden>
+          <span class="field-label">Antall sjåfører</span>
+          <input type="number" id="f-antall" min="1" value="1" />
+        </label>
+
+        <label class="field">
+          <span class="field-label">E-post til tillitsvalgt <span class="field-optional">(valgfritt)</span></span>
+          <input type="email" id="f-epost-tv" placeholder="tillitsvalgt@eksempel.no" />
+        </label>
+        <label class="field">
+          <span class="field-label">Avdelingsleders e-post <span class="field-optional">(valgfritt)</span></span>
+          <input type="email" id="f-epost-leder" placeholder="leder@eksempel.no" />
+        </label>
+
+        <div class="field field-full toggle-row">
+          <label class="toggle">
+            <input type="checkbox" id="f-rullerende" />
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            <span class="toggle-text">
+              <strong>Rullerende turnus</strong>
+              <small>Roterer mellom sjåførene</small>
+            </span>
+          </label>
+        </div>
+
+        <div class="field field-full toggle-row">
+          <label class="toggle">
+            <input type="checkbox" id="f-lastebil" />
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            <span class="toggle-text">
+              <strong>Lastebil (FATS-regler)</strong>
+              <small>Kjøre- og hviletidsforordningen</small>
+            </span>
+          </label>
+        </div>
+
+        <label class="field field-full">
+          <span class="field-label">Årsak til turnusendring</span>
+          <textarea id="f-aarsak" rows="3" placeholder="Bakgrunn for endringen..."></textarea>
+        </label>
+
+        <label class="field field-full">
+          <span class="field-label">Fagforbundets syn / forslag</span>
+          <textarea id="f-fagforbund" rows="3" placeholder="Innspill fra fagforbundet..."></textarea>
+        </label>
+      </div>
+    </section>
+
+    <!-- SECTION 2 -->
+    <section class="card" id="section-shifts">
+      <header class="section-head">
+        <span class="section-num" id="shifts-num">2</span>
+        <div class="section-titles">
+          <h2>Vakter</h2>
+          <p>Klikk og dra på en dag for å lage en vakt · dra kantene for å justere</p>
+        </div>
+        <span class="section-complete" id="shifts-complete" hidden>✓ Komplett</span>
+      </header>
+
+      <div class="week-tabs" id="week-tabs"></div>
+      <div class="week-daterange" id="week-daterange"></div>
+
+      <div class="timeline-legend">
+        <span class="legend-key"><i class="dot dot-dag"></i>Dag</span>
+        <span class="legend-key"><i class="dot dot-kveld"></i>Kveld</span>
+        <span class="legend-key"><i class="dot dot-natt"></i>Natt</span>
+        <span class="legend-key"><i class="dot dot-helg"></i>Helg</span>
+      </div>
+
+      <div class="timeline" id="timeline"></div>
+
+      <div class="detail-list" id="detail-list"></div>
+
+      <p class="hint">FATS-validering kjører automatisk etter hver endring. Brudd vises i panelet til høyre.</p>
+    </section>
+
+    <!-- SECTION 3 -->
+    <section class="card" id="section-comment">
+      <header class="section-head">
+        <span class="section-num">3</span>
+        <div class="section-titles">
+          <h2>Annen kommentar</h2>
+          <p>Synlig på drøftingsnotatet</p>
+        </div>
+      </header>
+      <label class="field field-full">
+        <span class="field-label">Notat</span>
+        <textarea id="f-kommentar" rows="4" placeholder="Eventuell tilleggsinformasjon..."></textarea>
+      </label>
+    </section>
+  </div>
+
+  <!-- STICKY PANEL -->
+  <aside class="sticky-panel" id="sticky-panel">
+    <div class="summary-card">
+      <div class="summary-head">
+        <small>OPPSUMMERING</small>
+        <h3 id="sum-title">Avdeling · Rotasjon</h3>
+      </div>
+
+      <div class="gauge">
+        <svg viewBox="0 0 200 120" class="gauge-svg" aria-hidden="true">
+          <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#e2e8f0" stroke-width="14" stroke-linecap="round"/>
+          <path id="gauge-arc" d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#16a34a" stroke-width="14" stroke-linecap="round" stroke-dasharray="0 999"/>
+          <line id="gauge-needle" x1="100" y1="100" x2="100" y2="30" stroke="#0f172a" stroke-width="2.5" stroke-linecap="round"/>
+          <circle cx="100" cy="100" r="5" fill="#0f172a"/>
+        </svg>
+        <div class="gauge-value">
+          <span id="gauge-pct" class="mono">0%</span>
+          <small>STILLINGSPROSENT</small>
+        </div>
+      </div>
+
+      <div class="stat-grid">
+        <div><small>ANTALL UKER</small><strong class="mono"><span id="stat-uker">0</span> uker</strong></div>
+        <div><small>SUM TIMER</small><strong class="mono"><span id="stat-sum">0</span> t</strong></div>
+        <div><small>SNITT / UKE</small><strong class="mono"><span id="stat-snitt">0</span> t</strong></div>
+        <div><small>FULL STILLING</small><strong class="mono">37,5 t/uke</strong></div>
+      </div>
+
+      <div class="gauge-scale">
+        <span>STILLINGSPROSENT</span>
+        <span class="mono">0 — 100% — 130%</span>
+      </div>
+    </div>
+
+    <div class="fats-panel" id="fats-panel" hidden>
+      <div class="fats-head">
+        <h4>FATS / AKT-validering</h4>
+        <span class="fats-count" id="fats-count">0 brudd</span>
+      </div>
+      <div class="fats-list" id="fats-list"></div>
+    </div>
+
+    <div class="action-card">
+      <h4>Last ned drøftingsnotat</h4>
+      <p>PDF klar for fagforbundet, med signaturlinjer for leder og tillitsvalgt.</p>
+      <button type="button" class="btn btn-primary btn-block" id="btn-pdf" disabled title="Fyll ut obligatoriske felt og legg til minst én vakt">
+        <span>⬇</span> Last ned PDF
+      </button>
+      <div class="action-row">
+        <button type="button" class="btn btn-outline" id="btn-email" disabled>
+          <span>✉</span> Send på e-post
+        </button>
+        <button type="button" class="btn btn-outline" id="btn-print">
+          <span>🖨</span> Skriv ut
+        </button>
+      </div>
+      <p class="autosave-hint" id="autosave-hint">Ikke lagret ennå</p>
+    </div>
+  </aside>
+</main>
+
+<footer class="site-footer">
+  <span>© Turnusgenerator · Drøftingsverktøy</span>
+  <span class="mono">Versjon 1.0</span>
+</footer>
+
+<!-- Modal: edit shift on mobile -->
+<div class="modal-backdrop" id="modal-backdrop" hidden>
+  <div class="modal" role="dialog" aria-modal="true">
+    <header class="modal-head">
+      <h3 id="modal-title">Vakt</h3>
+      <button type="button" class="modal-close" id="modal-close" aria-label="Lukk">×</button>
+    </header>
+    <div class="modal-body" id="modal-body"></div>
+    <footer class="modal-foot" id="modal-foot"></footer>
+  </div>
+</div>
+
+<!-- Confirm dialog -->
+<div class="modal-backdrop" id="confirm-backdrop" hidden>
+  <div class="modal modal-sm" role="dialog" aria-modal="true">
+    <header class="modal-head">
+      <h3 id="confirm-title">Bekreft</h3>
+    </header>
+    <div class="modal-body">
+      <p id="confirm-text">Er du sikker?</p>
+    </div>
+    <footer class="modal-foot">
+      <button type="button" class="btn btn-outline" id="confirm-cancel">Avbryt</button>
+      <button type="button" class="btn btn-primary" id="confirm-ok">OK</button>
+    </footer>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="toast" hidden></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="app.js?v=20260522"></script>
+</body>
+</html>
