@@ -66,6 +66,72 @@ function isoWeeksInYear(year) {
   return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
 }
 
+const MONTH_SHORT_NO = ['jan.', 'feb.', 'mars', 'apr.', 'mai', 'juni', 'juli', 'aug.', 'sep.', 'okt.', 'nov.', 'des.'];
+
+function isRotasjon() { return !!formData.rullerende; }
+
+function dateToIsoWeek(date) {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const dow = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dow);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  return { num: weekNo, year: d.getUTCFullYear() };
+}
+
+function currentIsoWeek() {
+  const now = new Date();
+  return dateToIsoWeek(new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())));
+}
+
+function addWeeksToIso(num, year, n) {
+  const monday = isoWeekToDate(num, year);
+  monday.setUTCDate(monday.getUTCDate() + n * 7);
+  return dateToIsoWeek(monday);
+}
+
+function parseIsoDate(str) {
+  if (!str) return null;
+  const [y, m, d] = str.split('-').map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(Date.UTC(y, m - 1, d));
+}
+
+function mondayOfWeekContaining(date) {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const dow = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() - (dow - 1));
+  return d;
+}
+
+function formatDateRangeNo(mon, sun) {
+  const monDay = mon.getUTCDate();
+  const sunDay = sun.getUTCDate();
+  const sunMonth = MONTH_SHORT_NO[sun.getUTCMonth()];
+  const monMonth = MONTH_SHORT_NO[mon.getUTCMonth()];
+  const year = sun.getUTCFullYear();
+  if (mon.getUTCMonth() === sun.getUTCMonth() && mon.getUTCFullYear() === sun.getUTCFullYear()) {
+    return `${monDay}. – ${sunDay}. ${sunMonth} ${year}`;
+  }
+  return `${monDay}. ${monMonth} – ${sunDay}. ${sunMonth} ${year}`;
+}
+
+function recomputeCalendarWeeksFromFirst(first) {
+  for (let j = 0; j < weekMeta.length; j++) {
+    const w = j === 0 ? first : addWeeksToIso(first.num, first.year, j);
+    weekMeta[j] = { num: w.num, year: w.year };
+  }
+}
+
+function defaultFirstCalendarWeek() {
+  if (formData.ikrafttredelsesdato) {
+    const date = parseIsoDate(formData.ikrafttredelsesdato);
+    if (date) return dateToIsoWeek(date);
+  }
+  const today = currentIsoWeek();
+  return addWeeksToIso(today.num, today.year, 2);
+}
+
 // ====== Shift category ======
 function categorizeShift(weekIdx, dayIdx, shift) {
   if (dayIdx >= 5) return 'helg';
@@ -236,9 +302,10 @@ function updateAutosaveHint() {
 
 // ====== Initial data ======
 function initDefaults() {
-  weekMeta = [{ num: 22, year: 2025 }];
+  const today = currentIsoWeek();
+  const first = addWeeksToIso(today.num, today.year, 2);
+  weekMeta = [{ num: first.num, year: first.year }];
   weeks = [emptyWeek()];
-  // Mon-Fri shifts uke 22
   weeks[0][0] = [{ start: 7 * 60, end: 15 * 60 + 30 }];
   weeks[0][1] = [{ start: 7 * 60, end: 15 * 60 + 30 }];
   weeks[0][2] = [{ start: 7 * 60, end: 15 * 60 + 30 }];
@@ -248,7 +315,7 @@ function initDefaults() {
   formData.avdeling = 'Bergen Distribusjon';
   formData.avdelingsleder = 'Ingrid Solheim';
   formData.typeTurnus = 'Personlig';
-  formData.ikrafttredelsesdato = '2026-07-01';
+  formData.ikrafttredelsesdato = '';
 }
 function emptyWeek() { return [[], [], [], [], [], [], []]; }
 
@@ -297,8 +364,10 @@ function renderWeekTabs() {
     if (i === activeWeek) tab.classList.add('active');
     if (fatsResult.weekFlags[i] === 'broken') tab.classList.add('fats-broken');
     if (fatsResult.weekFlags[i] === 'warn') tab.classList.add('fats-warn');
-    tab.innerHTML = `<span class="tab-label">Uke ${wm.num}</span>` +
-                    `<span class="tab-year mono">'${String(wm.year).slice(-2)}</span>`;
+    const yearSuffix = isRotasjon()
+      ? ''
+      : `<span class="tab-year mono">'${String(wm.year).slice(-2)}</span>`;
+    tab.innerHTML = `<span class="tab-label">Uke ${wm.num}</span>` + yearSuffix;
     tab.addEventListener('click', e => {
       if (e.target.classList.contains('tab-close')) return;
       activeWeek = i; renderAll();
@@ -334,37 +403,80 @@ function renderWeekTabs() {
 
 function editWeekTab(i, tabEl) {
   const wm = weekMeta[i];
+  const rot = isRotasjon();
   tabEl.innerHTML = '';
   const numInp = document.createElement('input');
-  numInp.type = 'number'; numInp.min = 1; numInp.max = 53; numInp.value = wm.num;
+  numInp.type = 'number';
+  numInp.min = 1;
+  numInp.value = wm.num;
   numInp.className = 'week-edit-input';
-  const yearInp = document.createElement('input');
-  yearInp.type = 'number'; yearInp.min = 2000; yearInp.max = 2100; yearInp.value = wm.year;
-  yearInp.className = 'week-edit-input';
+  if (!rot) numInp.max = 53;
   tabEl.appendChild(numInp);
-  tabEl.appendChild(yearInp);
+
+  let yearInp = null;
+  if (!rot) {
+    yearInp = document.createElement('input');
+    yearInp.type = 'number';
+    yearInp.min = 2000;
+    yearInp.max = 2100;
+    yearInp.value = wm.year || new Date().getFullYear();
+    yearInp.className = 'week-edit-input';
+    tabEl.appendChild(yearInp);
+  }
   numInp.focus();
   numInp.select();
+
   const commit = () => {
-    const max = isoWeeksInYear(parseInt(yearInp.value));
-    wm.num = clamp(parseInt(numInp.value) || 1, 1, max);
-    wm.year = parseInt(yearInp.value) || wm.year;
+    if (rot) {
+      const newNum = Math.max(1, parseInt(numInp.value) || 1);
+      for (let j = i; j < weekMeta.length; j++) {
+        weekMeta[j] = { num: newNum + (j - i), year: null };
+      }
+    } else {
+      const newYear = parseInt(yearInp.value) || wm.year || new Date().getFullYear();
+      const max = isoWeeksInYear(newYear);
+      const newNum = clamp(parseInt(numInp.value) || 1, 1, max);
+      weekMeta[i] = { num: newNum, year: newYear };
+      for (let j = i + 1; j < weekMeta.length; j++) {
+        const w = addWeeksToIso(newNum, newYear, j - i);
+        weekMeta[j] = { num: w.num, year: w.year };
+      }
+    }
     scheduleSave();
     renderAll();
   };
-  const onKey = e => { if (e.key === 'Enter') { e.preventDefault(); commit(); } if (e.key === 'Escape') renderAll(); };
-  numInp.addEventListener('blur', commit);
-  yearInp.addEventListener('blur', commit);
+
+  const handleBlur = (e) => {
+    if (yearInp && (e.relatedTarget === numInp || e.relatedTarget === yearInp)) return;
+    commit();
+  };
+  const onKey = e => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    if (e.key === 'Escape') renderAll();
+  };
+  numInp.addEventListener('blur', handleBlur);
   numInp.addEventListener('keydown', onKey);
-  yearInp.addEventListener('keydown', onKey);
+  if (yearInp) {
+    yearInp.addEventListener('blur', handleBlur);
+    yearInp.addEventListener('keydown', onKey);
+  }
 }
 
 function addWeek() {
-  const last = weekMeta[weekMeta.length - 1] || { num: 1, year: new Date().getFullYear() };
-  const max = isoWeeksInYear(last.year);
-  let num = last.num + 1, year = last.year;
-  if (num > max) { num = 1; year += 1; }
-  weekMeta.push({ num, year });
+  if (isRotasjon()) {
+    const last = weekMeta[weekMeta.length - 1];
+    const nextNum = (last && last.num ? last.num : 0) + 1;
+    weekMeta.push({ num: nextNum, year: null });
+  } else {
+    const last = weekMeta[weekMeta.length - 1];
+    if (last && last.year) {
+      const next = addWeeksToIso(last.num, last.year, 1);
+      weekMeta.push({ num: next.num, year: next.year });
+    } else {
+      const first = defaultFirstCalendarWeek();
+      weekMeta.push({ num: first.num, year: first.year });
+    }
+  }
   weeks.push(emptyWeek());
   activeWeek = weeks.length - 1;
   scheduleSave();
@@ -374,10 +486,23 @@ function addWeek() {
 function renderDateRange() {
   const el = document.getElementById('week-daterange');
   if (!weekMeta[activeWeek]) { el.textContent = ''; return; }
-  const wm = weekMeta[activeWeek];
-  const mon = isoWeekToDate(wm.num, wm.year);
-  const sun = new Date(mon); sun.setUTCDate(mon.getUTCDate() + 6);
-  el.textContent = `${formatDateShort(mon)} – ${formatDateShort(sun)} ${wm.year}`;
+  if (isRotasjon()) {
+    const base = parseIsoDate(formData.ikrafttredelsesdato);
+    if (!base) { el.textContent = ''; return; }
+    const baseMonday = mondayOfWeekContaining(base);
+    const mon = new Date(baseMonday);
+    mon.setUTCDate(mon.getUTCDate() + activeWeek * 7);
+    const sun = new Date(mon);
+    sun.setUTCDate(mon.getUTCDate() + 6);
+    el.textContent = formatDateRangeNo(mon, sun);
+  } else {
+    const wm = weekMeta[activeWeek];
+    if (!wm.year) { el.textContent = ''; return; }
+    const mon = isoWeekToDate(wm.num, wm.year);
+    const sun = new Date(mon);
+    sun.setUTCDate(mon.getUTCDate() + 6);
+    el.textContent = formatDateRangeNo(mon, sun);
+  }
 }
 
 function renderTimeline() {
@@ -562,7 +687,10 @@ function renderSummary() {
   pctEl.classList.toggle('over', pct > 100);
 
   // Title
-  const title = (formData.avdeling || 'Avdeling') + ' · Rotasjon på ' + weeks.length + ' uke' + (weeks.length === 1 ? '' : 'r');
+  const dept = formData.avdeling || 'Avdeling';
+  const title = isRotasjon()
+    ? `${dept} · Rotasjon på ${weeks.length} uke${weeks.length === 1 ? '' : 'r'}`
+    : `${dept} · Turnus`;
   document.getElementById('sum-title').textContent = title;
 
   // Gauge arc + needle
@@ -646,8 +774,28 @@ function wireForm() {
         document.getElementById('wrap-navn').hidden = !personlig;
         document.getElementById('wrap-antall').hidden = personlig;
       }
+      if (key === 'ikrafttredelsesdato') {
+        if (!isRotasjon() && formData.ikrafttredelsesdato) {
+          const date = parseIsoDate(formData.ikrafttredelsesdato);
+          if (date) recomputeCalendarWeeksFromFirst(dateToIsoWeek(date));
+        }
+        scheduleSave();
+        renderAll();
+        return;
+      }
+      if (key === 'rullerende') {
+        if (el.checked) {
+          for (let j = 0; j < weekMeta.length; j++) {
+            weekMeta[j] = { num: j + 1, year: null };
+          }
+        } else {
+          recomputeCalendarWeeksFromFirst(defaultFirstCalendarWeek());
+        }
+        scheduleSave();
+        renderAll();
+        return;
+      }
       scheduleSave();
-      // partial re-render: keep timeline if shifts unchanged
       if (['lastebil'].includes(key)) renderAll();
       else { renderSummary(); updateCompleteBadges(); updatePdfState(); }
     });
@@ -989,11 +1137,17 @@ function generatePDF() {
   weeks.forEach((week, wi) => {
     if (y > pageH - 60) { doc.addPage(); y = margin; }
     const wm = weekMeta[wi];
-    const mon = isoWeekToDate(wm.num, wm.year);
-    const sun = new Date(mon); sun.setUTCDate(mon.getUTCDate() + 6);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(12);
-    doc.text(`Uke ${wm.num} ${wm.year}  (${formatDateShort(mon)}–${formatDateShort(sun)})`, margin, y);
+    let weekTitle;
+    if (isRotasjon()) {
+      weekTitle = `Uke ${wm.num}`;
+    } else {
+      const mon = isoWeekToDate(wm.num, wm.year);
+      const sun = new Date(mon); sun.setUTCDate(mon.getUTCDate() + 6);
+      weekTitle = `Uke ${wm.num}, ${wm.year}  (${formatDateShort(mon)}–${formatDateShort(sun)})`;
+    }
+    doc.text(weekTitle, margin, y);
     y += 6;
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9);
