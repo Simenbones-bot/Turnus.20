@@ -643,6 +643,10 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; colo
   cursor: not-allowed;
   opacity: 0.6;
 }
+.btn-danger { background: var(--color-danger); color: #fff; border-color: var(--color-danger); }
+.btn-danger:hover { background: #b91c1c; border-color: #b91c1c; }
+.btn-reset { margin-top: 12px; font-size: 12px; opacity: 0.7; padding: 6px 12px; }
+.btn-reset:hover { opacity: 1; }
 .btn-block { width: 100%; }
 .btn-sm { padding: 6px 12px; font-size: 13px; }
 

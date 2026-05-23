@@ -132,6 +132,54 @@ function defaultFirstCalendarWeek() {
   return addWeeksToIso(today.num, today.year, 2);
 }
 
+function isSundayCrossWeek(shift, dayIdx) {
+  return dayIdx === 6 && shift.end > TIMELINE_END;
+}
+
+function splitShiftAcrossWeeks(shift, dayIdx) {
+  if (!isSundayCrossWeek(shift, dayIdx)) {
+    return {
+      isSplit: false,
+      currentWeekBrutto: shiftGross(shift),
+      nextWeekBrutto: 0,
+      currentWeekLunch: lunchMinutes(shiftGross(shift)),
+      nextWeekLunch: 0,
+      currentWeekNet: shiftNet(shift),
+      nextWeekNet: 0,
+    };
+  }
+  const currentBrutto = TIMELINE_END - shift.start;
+  const nextBrutto = shift.end - TIMELINE_END;
+  const totalBrutto = shiftGross(shift);
+  const totalLunch = lunchMinutes(totalBrutto);
+  const currentLunch = Math.round((currentBrutto / totalBrutto) * totalLunch);
+  const nextLunch = totalLunch - currentLunch;
+  return {
+    isSplit: true,
+    currentWeekBrutto: currentBrutto,
+    nextWeekBrutto: nextBrutto,
+    currentWeekLunch: currentLunch,
+    nextWeekLunch: nextLunch,
+    currentWeekNet: Math.max(0, currentBrutto - currentLunch),
+    nextWeekNet: Math.max(0, nextBrutto - nextLunch),
+  };
+}
+
+function maybeCreateNextWeekForCrossWeekShifts() {
+  for (let wi = 0; wi < weeks.length; wi++) {
+    if ((weeks[wi][6] || []).some(s => s.end > TIMELINE_END)) {
+      if (wi + 1 >= weeks.length) {
+        const lastMeta = weekMeta[wi];
+        const nextMeta = isRotasjon()
+          ? { num: lastMeta.num + 1, year: null }
+          : addWeeksToIso(lastMeta.num, lastMeta.year, 1);
+        weekMeta.push(nextMeta);
+        weeks.push(emptyWeek());
+      }
+    }
+  }
+}
+
 // ====== Shift category ======
 function categorizeShift(weekIdx, dayIdx, shift) {
   if (dayIdx >= 5) return 'helg';
@@ -530,6 +578,18 @@ function renderTimeline() {
   const week = weeks[activeWeek] || emptyWeek();
   const pendingCont = []; // continuation blocks to append after all rows exist
 
+  // Cross-week continuations from previous week's Sunday
+  const prevWeekCrossConts = [];
+  if (activeWeek > 0 && weeks[activeWeek - 1]) {
+    (weeks[activeWeek - 1][6] || []).forEach((s, si) => {
+      if (s.end > TIMELINE_END) {
+        const cat = categorizeShift(activeWeek - 1, 6, s);
+        const isBroken = fatsResult.shiftFlags[`${activeWeek - 1}-6-${si}`] === 'broken';
+        prevWeekCrossConts.push({ si, cat, isBroken, s });
+      }
+    });
+  }
+
   for (let di = 0; di < 7; di++) {
     const row = document.createElement('div');
     row.className = 'timeline-row';
@@ -593,6 +653,28 @@ function renderTimeline() {
       }
     });
 
+    // Add cross-week continuation blocks on Monday (di===0)
+    if (di === 0) {
+      prevWeekCrossConts.forEach(({ si, cat, isBroken, s }) => {
+        const contEnd = s.end - TIMELINE_END;
+        const block = document.createElement('div');
+        block.className = `shift shift-${cat} shift-split-cont${isBroken ? ' broken' : ''}`;
+        block.style.left = '0%';
+        block.style.width = ((contEnd / TIMELINE_END) * 100) + '%';
+        block.dataset.day = 0;
+        block.dataset.originDay = 6;
+        block.dataset.originWeek = activeWeek - 1;
+        block.dataset.idx = si;
+        block.dataset.role = 'cross-week-cont';
+        block.innerHTML = `
+          <span class="shift-label"><i class="label-dot"></i>${cat.toUpperCase()}</span>
+          <span class="shift-time">– ${minutesToHHMM(s.end)}</span>
+          ${isBroken ? '<span class="shift-warn">⚠</span>' : ''}
+          <span class="shift-chain" title="Fortsettelse fra Uke ${weekMeta[activeWeek - 1] ? weekMeta[activeWeek - 1].num : '?'}">↩</span>
+          <span class="shift-handle right" data-handle="end">⋮</span>`;
+        track.appendChild(block);
+      });
+    }
     row.appendChild(dayLabel);
     row.appendChild(track);
     root.appendChild(row);
@@ -838,28 +920,38 @@ function wireTimeline() {
       const role = shiftEl.dataset.role;
       const isContinuation = role === 'continuation';
       const isSplitStart = role === 'split-start';
+      const isCrossWeekCont = role === 'cross-week-cont';
 
-      // Resolve actual shift origin
-      const di = isContinuation ? parseInt(shiftEl.dataset.originDay) : trackDi;
+      let di, weekIdx;
+      if (isContinuation) {
+        di = parseInt(shiftEl.dataset.originDay);
+        weekIdx = activeWeek;
+      } else if (isCrossWeekCont) {
+        di = 6;
+        weekIdx = parseInt(shiftEl.dataset.originWeek);
+      } else {
+        di = trackDi;
+        weekIdx = activeWeek;
+      }
+
       const si = parseInt(shiftEl.dataset.idx);
-      const shift = weeks[activeWeek][di][si];
+      const shift = weeks[weekIdx] && weeks[weekIdx][di] && weeks[weekIdx][di][si];
+      if (!shift) return;
 
       if (handle) {
         const which = handle.dataset.handle;
-        // Inner edges are not draggable
-        if (isContinuation && which === 'start') { e.preventDefault(); return; }
+        if ((isContinuation || isCrossWeekCont) && which === 'start') { e.preventDefault(); return; }
         if (isSplitStart && which === 'end') { e.preventDefault(); return; }
         const mode = which === 'start' ? 'resize-start' : 'resize-end';
-        drag = { mode, weekIdx: activeWeek, dayIdx: di, shiftIdx: si,
+        drag = { mode, weekIdx, dayIdx: di, shiftIdx: si,
           startX: e.clientX, originalShift: { ...shift }, trackRect: rect };
       } else {
-        drag = { mode: 'move', weekIdx: activeWeek, dayIdx: di, shiftIdx: si,
+        drag = { mode: 'move', weekIdx, dayIdx: di, shiftIdx: si,
           startX: e.clientX, originalShift: { ...shift }, trackRect: rect };
       }
       shiftEl.classList.add('dragging');
       e.preventDefault();
     } else {
-      // Create new shift
       const startMin = snap(clamp(pxToMinutes(track, e.clientX - rect.left), 0, TIMELINE_END - MIN_SHIFT));
       const newShift = { start: startMin, end: startMin + MIN_SHIFT };
       weeks[activeWeek][trackDi].push(newShift);
@@ -905,16 +997,15 @@ function wireTimeline() {
 
   document.addEventListener('mouseup', () => {
     if (!drag.mode) return;
-    // Snap and validate
-    const shift = weeks[drag.weekIdx][drag.dayIdx][drag.shiftIdx];
+    const shift = weeks[drag.weekIdx] && weeks[drag.weekIdx][drag.dayIdx] && weeks[drag.weekIdx][drag.dayIdx][drag.shiftIdx];
     if (shift) {
       shift.start = snap(shift.start);
       shift.end = snap(shift.end);
       if (shift.end - shift.start < MIN_SHIFT) {
-        // remove tiny shift
         weeks[drag.weekIdx][drag.dayIdx].splice(drag.shiftIdx, 1);
       }
     }
+    maybeCreateNextWeekForCrossWeekShifts();
     drag = { mode: null };
     scheduleSave();
     renderAll();
@@ -1046,13 +1137,16 @@ function openShiftModal(di) {
 }
 
 // ====== Confirm dialog ======
-function confirmDialog(title, text, onOk) {
+function confirmDialog(title, text, onOk, opts = {}) {
   const bd = document.getElementById('confirm-backdrop');
   document.getElementById('confirm-title').textContent = title;
   document.getElementById('confirm-text').textContent = text;
   bd.hidden = false;
+  const okBtn = document.getElementById('confirm-ok');
+  okBtn.textContent = opts.okLabel || 'OK';
+  okBtn.className = opts.okClass || 'btn btn-primary';
   document.getElementById('confirm-cancel').onclick = () => { bd.hidden = true; };
-  document.getElementById('confirm-ok').onclick = () => { bd.hidden = true; onOk && onOk(); };
+  okBtn.onclick = () => { bd.hidden = true; onOk && onOk(); };
 }
 
 // ====== Toast ======
@@ -1246,6 +1340,24 @@ function generatePDF() {
   return filename;
 }
 
+function hardReset() {
+  formData = {
+    avdeling: '', avdelingsleder: '', typeTurnus: 'Personlig',
+    ikrafttredelsesdato: '', navn: '', antallSjaforer: 1,
+    aarsak: '', fagforbundetSyn: '', annenKommentar: '',
+    epostTillitsvalgt: '', epostLeder: '', rullerende: false, lastebil: false,
+  };
+  lastebil = false;
+  lastSavedAt = null;
+  discardDraft();
+  const today = currentIsoWeek();
+  const first = addWeeksToIso(today.num, today.year, 2);
+  weekMeta = [{ num: first.num, year: first.year }];
+  weeks = [emptyWeek()];
+  activeWeek = 0;
+  fatsResult = { broken: [], warnings: [], shiftFlags: {}, weekFlags: {} };
+}
+
 // ====== PDF action wiring ======
 function wireActions() {
   document.getElementById('btn-pdf').addEventListener('click', () => {
@@ -1268,6 +1380,15 @@ function wireActions() {
 
   document.getElementById('btn-print').addEventListener('click', () => {
     window.print();
+  });
+
+  document.getElementById('btn-reset').addEventListener('click', () => {
+    confirmDialog(
+      'Nullstille turnusgeneratoren?',
+      'Alle data går tapt — skjemafelt, vakter og alle uker slettes. Denne handlingen kan ikke angres.',
+      () => { hardReset(); syncFormToDOM(); renderAll(); },
+      { okLabel: 'Nullstill', okClass: 'btn btn-danger' }
+    );
   });
 }
 
