@@ -305,8 +305,6 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; colo
   transform: translateX(-50%);
   white-space: nowrap;
 }
-.timeline-header .hour-tick.next-day { color: var(--color-primary); }
-
 .timeline-row {
   display: flex;
   border-bottom: 1px solid var(--color-border);
@@ -328,21 +326,10 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; colo
 .day-track {
   position: relative;
   flex: 1;
-  background:
-    linear-gradient(to right, #fff 0%, #fff calc(100% * 24 / 30), #f8fafc calc(100% * 24 / 30), #f8fafc 100%);
+  background: #fff;
   cursor: crosshair;
   min-height: 64px;
 }
-.day-track::before,
-.day-track::after {
-  content: '';
-  position: absolute;
-  top: 0; bottom: 0;
-  width: 1px;
-  background: var(--color-border);
-}
-.day-track::after { left: calc(100% * 24 / 30); }
-.day-track::before { display: none; }
 
 .hour-gridline {
   position: absolute;
@@ -410,6 +397,29 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; colo
   right: 12px;
   font-size: 10px;
   opacity: 0.85;
+}
+
+/* Split-block (night shift spanning midnight) */
+.shift-split-start {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.shift-split-cont {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+.shift-chain {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  font-size: 10px;
+  opacity: 0.65;
+  line-height: 1;
+  pointer-events: none;
+}
+.shift-split-cont .shift-chain {
+  right: auto;
+  left: 3px;
 }
 
 /* ===== Detail list ===== */

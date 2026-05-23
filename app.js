@@ -28,18 +28,15 @@ let lastSavedAt = null;
 const DAY_NAMES = ['Mandag', 'Tirsdag', 'Onsdag', 'Torsdag', 'Fredag', 'Lørdag', 'Søndag'];
 const DAY_SHORT = ['Man', 'Tir', 'Ons', 'Tor', 'Fre', 'Lør', 'Søn'];
 const TIMELINE_START = 0;
-const TIMELINE_END = 30 * 60; // 30 hours in minutes
+const TIMELINE_END = 24 * 60; // 24 hours in minutes
 const SNAP = 15;
 const MIN_SHIFT = 15;
 
 // ====== Utilities ======
 function minutesToHHMM(min) {
-  const wrapped = min >= 24 * 60;
-  const m = wrapped ? min - 24 * 60 : min;
-  const h = Math.floor(m / 60);
-  const mm = m % 60;
-  const s = String(h).padStart(2, '0') + ':' + String(mm).padStart(2, '0');
-  return wrapped ? s + '+1' : s;
+  const h = Math.floor((min % (24 * 60)) / 60);
+  const mm = min % 60;
+  return String(h).padStart(2, '0') + ':' + String(mm).padStart(2, '0');
 }
 function snap(x) { return Math.round(x / SNAP) * SNAP; }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -387,7 +384,7 @@ function renderTimeline() {
   const root = document.getElementById('timeline');
   root.innerHTML = '';
 
-  // header with hour labels
+  // header with hour labels 00–23
   const header = document.createElement('div');
   header.className = 'timeline-header';
   const spacer = document.createElement('div');
@@ -395,18 +392,19 @@ function renderTimeline() {
   header.appendChild(spacer);
   const hoursWrap = document.createElement('div');
   hoursWrap.className = 'hours';
-  for (let h = 0; h <= 30; h += 3) {
+  for (let h = 0; h < 24; h++) {
     const tick = document.createElement('span');
-    tick.className = 'hour-tick' + (h >= 24 ? ' next-day' : '');
-    tick.style.left = ((h / 30) * 100) + '%';
-    const label = h >= 24 ? `${String(h - 24).padStart(2, '0')}+1` : `${String(h).padStart(2, '0')}:00`;
-    tick.textContent = label;
+    tick.className = 'hour-tick';
+    tick.style.left = ((h / 24) * 100) + '%';
+    tick.textContent = String(h).padStart(2, '0');
     hoursWrap.appendChild(tick);
   }
   header.appendChild(hoursWrap);
   root.appendChild(header);
 
   const week = weeks[activeWeek] || emptyWeek();
+  const pendingCont = []; // continuation blocks to append after all rows exist
+
   for (let di = 0; di < 7; di++) {
     const row = document.createElement('div');
     row.className = 'timeline-row';
@@ -419,39 +417,83 @@ function renderTimeline() {
     track.dataset.day = di;
 
     // hour gridlines
-    for (let h = 1; h < 30; h++) {
+    for (let h = 1; h < 24; h++) {
       const gl = document.createElement('div');
       gl.className = 'hour-gridline';
-      gl.style.left = ((h / 30) * 100) + '%';
+      gl.style.left = ((h / 24) * 100) + '%';
       track.appendChild(gl);
     }
 
     // shifts
     week[di].forEach((s, si) => {
       const cat = categorizeShift(activeWeek, di, s);
-      const block = document.createElement('div');
       const isBroken = fatsResult.shiftFlags[`${activeWeek}-${di}-${si}`] === 'broken';
-      block.className = 'shift shift-' + cat + (isBroken ? ' broken' : '');
-      const leftPct = (s.start / TIMELINE_END) * 100;
-      const widthPct = ((s.end - s.start) / TIMELINE_END) * 100;
-      block.style.left = leftPct + '%';
-      block.style.width = widthPct + '%';
-      block.dataset.day = di;
-      block.dataset.idx = si;
-      block.innerHTML = `
-        <span class="shift-label"><i class="label-dot"></i>${cat.toUpperCase()}</span>
-        <span class="shift-time">${minutesToHHMM(s.start)} – ${minutesToHHMM(s.end)}</span>
-        ${isBroken ? '<span class="shift-warn">⚠</span>' : ''}
-        <span class="shift-handle left" data-handle="start">⋮</span>
-        <span class="shift-handle right" data-handle="end">⋮</span>
-      `;
-      track.appendChild(block);
+      const isSplit = s.end > TIMELINE_END;
+
+      if (isSplit) {
+        // Start block: start → midnight
+        const startBlock = document.createElement('div');
+        startBlock.className = `shift shift-${cat} shift-split-start${isBroken ? ' broken' : ''}`;
+        startBlock.style.left = ((s.start / TIMELINE_END) * 100) + '%';
+        startBlock.style.width = (((TIMELINE_END - s.start) / TIMELINE_END) * 100) + '%';
+        startBlock.dataset.day = di;
+        startBlock.dataset.idx = si;
+        startBlock.dataset.role = 'split-start';
+        startBlock.innerHTML = `
+          <span class="shift-label"><i class="label-dot"></i>${cat.toUpperCase()}</span>
+          <span class="shift-time">${minutesToHHMM(s.start)} –</span>
+          ${isBroken ? '<span class="shift-warn">⚠</span>' : ''}
+          <span class="shift-handle left" data-handle="start">⋮</span>
+          <span class="shift-chain" title="Fortsetter neste dag">↪</span>`;
+        track.appendChild(startBlock);
+
+        if (di + 1 < 7) {
+          pendingCont.push({ targetDi: di + 1, originDi: di, si, cat, isBroken, s });
+        }
+      } else {
+        // Normal single block
+        const block = document.createElement('div');
+        block.className = `shift shift-${cat}${isBroken ? ' broken' : ''}`;
+        block.style.left = ((s.start / TIMELINE_END) * 100) + '%';
+        block.style.width = (((s.end - s.start) / TIMELINE_END) * 100) + '%';
+        block.dataset.day = di;
+        block.dataset.idx = si;
+        block.innerHTML = `
+          <span class="shift-label"><i class="label-dot"></i>${cat.toUpperCase()}</span>
+          <span class="shift-time">${minutesToHHMM(s.start)} – ${minutesToHHMM(s.end)}</span>
+          ${isBroken ? '<span class="shift-warn">⚠</span>' : ''}
+          <span class="shift-handle left" data-handle="start">⋮</span>
+          <span class="shift-handle right" data-handle="end">⋮</span>`;
+        track.appendChild(block);
+      }
     });
 
     row.appendChild(dayLabel);
     row.appendChild(track);
     root.appendChild(row);
   }
+
+  // Append continuation blocks now that all rows exist
+  pendingCont.forEach(({ targetDi, originDi, si, cat, isBroken, s }) => {
+    const targetTrack = root.querySelector(`.day-track[data-day="${targetDi}"]`);
+    if (!targetTrack) return;
+    const contEnd = s.end - TIMELINE_END;
+    const block = document.createElement('div');
+    block.className = `shift shift-${cat} shift-split-cont${isBroken ? ' broken' : ''}`;
+    block.style.left = '0%';
+    block.style.width = ((contEnd / TIMELINE_END) * 100) + '%';
+    block.dataset.day = targetDi;
+    block.dataset.originDay = originDi;
+    block.dataset.idx = si;
+    block.dataset.role = 'continuation';
+    block.innerHTML = `
+      <span class="shift-label"><i class="label-dot"></i>${cat.toUpperCase()}</span>
+      <span class="shift-time">– ${minutesToHHMM(s.end)}</span>
+      ${isBroken ? '<span class="shift-warn">⚠</span>' : ''}
+      <span class="shift-chain" title="Fortsettelse fra forrige dag">↩</span>
+      <span class="shift-handle right" data-handle="end">⋮</span>`;
+    targetTrack.appendChild(block);
+  });
 }
 
 function renderDetailList() {
@@ -466,7 +508,7 @@ function renderDetailList() {
       const net = gross - lunch;
       total += net;
       const broken = fatsResult.shiftFlags[`${activeWeek}-${di}-${si}`] === 'broken';
-      rows.push({ di, si, s, lunch, net, broken });
+      rows.push({ di, si, s, lunch, net, broken, isSplit: s.end > TIMELINE_END });
     });
   }
   if (!rows.length) {
@@ -479,8 +521,11 @@ function renderDetailList() {
     </thead>
     <tbody>`;
   rows.forEach(r => {
+    const splitDayName = r.isSplit && r.di + 1 < 7
+      ? `${DAY_NAMES[r.di]}–${DAY_NAMES[r.di + 1]}`
+      : DAY_NAMES[r.di];
     html += `<tr class="${r.broken ? 'row-broken' : ''}">
-      <td>${DAY_NAMES[r.di]}</td>
+      <td>${splitDayName}</td>
       <td class="mono">${minutesToHHMM(r.s.start)}</td>
       <td class="mono">${minutesToHHMM(r.s.end)}</td>
       <td class="mono">${r.lunch} min</td>
@@ -638,35 +683,41 @@ function wireTimeline() {
     const shiftEl = e.target.closest('.shift');
     const track = e.target.closest('.day-track');
     if (!track) return;
-    const di = parseInt(track.dataset.day);
+    const trackDi = parseInt(track.dataset.day);
     const rect = track.getBoundingClientRect();
+
     if (shiftEl) {
+      const role = shiftEl.dataset.role;
+      const isContinuation = role === 'continuation';
+      const isSplitStart = role === 'split-start';
+
+      // Resolve actual shift origin
+      const di = isContinuation ? parseInt(shiftEl.dataset.originDay) : trackDi;
       const si = parseInt(shiftEl.dataset.idx);
       const shift = weeks[activeWeek][di][si];
+
       if (handle) {
-        const which = handle.dataset.handle === 'start' ? 'resize-start' : 'resize-end';
-        drag = {
-          mode: which, weekIdx: activeWeek, dayIdx: di, shiftIdx: si,
-          startX: e.clientX, originalShift: { ...shift }, trackRect: rect,
-        };
+        const which = handle.dataset.handle;
+        // Inner edges are not draggable
+        if (isContinuation && which === 'start') { e.preventDefault(); return; }
+        if (isSplitStart && which === 'end') { e.preventDefault(); return; }
+        const mode = which === 'start' ? 'resize-start' : 'resize-end';
+        drag = { mode, weekIdx: activeWeek, dayIdx: di, shiftIdx: si,
+          startX: e.clientX, originalShift: { ...shift }, trackRect: rect };
       } else {
-        drag = {
-          mode: 'move', weekIdx: activeWeek, dayIdx: di, shiftIdx: si,
-          startX: e.clientX, originalShift: { ...shift }, trackRect: rect,
-        };
+        drag = { mode: 'move', weekIdx: activeWeek, dayIdx: di, shiftIdx: si,
+          startX: e.clientX, originalShift: { ...shift }, trackRect: rect };
       }
       shiftEl.classList.add('dragging');
       e.preventDefault();
     } else {
       // Create new shift
-      const startMin = snap(pxToMinutes(track, e.clientX - rect.left));
+      const startMin = snap(clamp(pxToMinutes(track, e.clientX - rect.left), 0, TIMELINE_END - MIN_SHIFT));
       const newShift = { start: startMin, end: startMin + MIN_SHIFT };
-      weeks[activeWeek][di].push(newShift);
-      const si = weeks[activeWeek][di].length - 1;
-      drag = {
-        mode: 'resize-end', weekIdx: activeWeek, dayIdx: di, shiftIdx: si,
-        startX: e.clientX, originalShift: { ...newShift }, trackRect: rect, createdNew: true,
-      };
+      weeks[activeWeek][trackDi].push(newShift);
+      const si = weeks[activeWeek][trackDi].length - 1;
+      drag = { mode: 'resize-end', weekIdx: activeWeek, dayIdx: trackDi, shiftIdx: si,
+        startX: e.clientX, originalShift: { ...newShift }, trackRect: rect, createdNew: true };
       renderTimeline();
       e.preventDefault();
     }
@@ -680,21 +731,25 @@ function wireTimeline() {
     const shift = weeks[drag.weekIdx][dayIdx][shiftIdx];
     if (mode === 'move') {
       const length = originalShift.end - originalShift.start;
-      let newStart = clamp(snap(originalShift.start + deltaMin), 0, TIMELINE_END - length);
+      const newStart = clamp(snap(originalShift.start + deltaMin), 0, TIMELINE_END - MIN_SHIFT);
       shift.start = newStart;
       shift.end = newStart + length;
     } else if (mode === 'resize-start') {
-      let newStart = clamp(snap(originalShift.start + deltaMin), 0, shift.end - MIN_SHIFT);
-      shift.start = newStart;
+      shift.start = clamp(snap(originalShift.start + deltaMin), 0, shift.end - MIN_SHIFT);
     } else if (mode === 'resize-end') {
-      // For new shift creation, recalc from absolute mouse position
       if (drag.createdNew) {
+        const track = document.querySelector(`.day-track[data-day="${dayIdx}"]`);
         const px = e.clientX - trackRect.left;
-        let newEnd = clamp(snap(pxToMinutes(document.querySelector(`.day-track[data-day="${dayIdx}"]`), px)), shift.start + MIN_SHIFT, TIMELINE_END);
+        let newEnd;
+        if (px <= trackRect.width) {
+          newEnd = clamp(snap(pxToMinutes(track, px)), shift.start + MIN_SHIFT, TIMELINE_END);
+        } else {
+          newEnd = TIMELINE_END + snap(((px - trackRect.width) / trackRect.width) * TIMELINE_END);
+          newEnd = clamp(newEnd, shift.start + MIN_SHIFT, 2 * TIMELINE_END);
+        }
         shift.end = newEnd;
       } else {
-        let newEnd = clamp(snap(originalShift.end + deltaMin), shift.start + MIN_SHIFT, TIMELINE_END);
-        shift.end = newEnd;
+        shift.end = clamp(snap(originalShift.end + deltaMin), shift.start + MIN_SHIFT, 2 * TIMELINE_END);
       }
     }
     renderTimeline();
@@ -822,7 +877,7 @@ function openShiftModal(di) {
     const t = document.createElement('span');
     t.textContent = label;
     const sel = document.createElement('select');
-    const max = allowNextDay ? TIMELINE_END : 24 * 60;
+    const max = allowNextDay ? 2 * TIMELINE_END : TIMELINE_END;
     for (let m = 0; m <= max; m += SNAP) {
       const opt = document.createElement('option');
       opt.value = m;
@@ -960,7 +1015,10 @@ function generatePDF() {
         const lunch = lunchMinutes(gross);
         const net = gross - lunch;
         weekTotal += net;
-        doc.text(DAY_NAMES[di], cols[0], y);
+        const pdfDayName = s.end > TIMELINE_END && di + 1 < 7
+          ? `${DAY_NAMES[di]}–${DAY_NAMES[di + 1]}`
+          : DAY_NAMES[di];
+        doc.text(pdfDayName, cols[0], y);
         doc.text(minutesToHHMM(s.start), cols[1], y);
         doc.text(minutesToHHMM(s.end), cols[2], y);
         doc.text(`${lunch} min`, cols[3], y);
