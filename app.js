@@ -253,6 +253,12 @@ function ensureShiftDefaults(s) {
   if (!s.availability || !Array.isArray(s.availability)) s.availability = [];
   return s;
 }
+function cleanupShiftAvailability(s) {
+  if (!s || !s.availability || !s.availability.length) return;
+  s.availability = s.availability
+    .map(p => ({ start: Math.max(p.start, s.start), end: Math.min(p.end, s.end) }))
+    .filter(p => p.end - p.start >= SNAP);
+}
 function migrateAllShifts() {
   weeks.forEach(w => w.forEach(day => day.forEach(ensureShiftDefaults)));
 }
@@ -1278,11 +1284,8 @@ function wireTimeline() {
       shift.end = snap(shift.end);
       if (shift.end - shift.start < MIN_SHIFT) {
         weeks[drag.weekIdx][drag.dayIdx].splice(drag.shiftIdx, 1);
-      } else if (shift.availability && shift.availability.length) {
-        // Trim/drop availability periods that no longer fit within the shift
-        shift.availability = shift.availability
-          .map(p => ({ start: Math.max(p.start, shift.start), end: Math.min(p.end, shift.end) }))
-          .filter(p => p.end - p.start >= SNAP);
+      } else {
+        cleanupShiftAvailability(shift);
       }
     }
     maybeCreateNextWeekForCrossWeekShifts();
@@ -1403,6 +1406,7 @@ function openShiftModal(di) {
       save.className = 'btn btn-primary';
       save.textContent = 'Lagre';
       save.addEventListener('click', () => {
+        cleanupShiftAvailability(shifts[editIdx]);
         scheduleSave();
         editIdx = null;
         renderAll();
