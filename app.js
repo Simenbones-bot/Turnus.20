@@ -138,6 +138,7 @@ function isSundayCrossWeek(shift, dayIdx) {
 
 function splitShiftAcrossWeeks(shift, dayIdx) {
   if (!isSundayCrossWeek(shift, dayIdx)) {
+    const avail = availabilityMinutes(shift);
     return {
       isSplit: false,
       currentWeekBrutto: shiftGross(shift),
@@ -146,6 +147,10 @@ function splitShiftAcrossWeeks(shift, dayIdx) {
       nextWeekLunch: 0,
       currentWeekNet: shiftNet(shift),
       nextWeekNet: 0,
+      currentWeekAvail: avail,
+      nextWeekAvail: 0,
+      currentWeekPaid: shiftPaid(shift),
+      nextWeekPaid: 0,
     };
   }
   const currentBrutto = TIMELINE_END - shift.start;
@@ -154,6 +159,15 @@ function splitShiftAcrossWeeks(shift, dayIdx) {
   const totalLunch = lunchMinutes(totalBrutto);
   const currentLunch = Math.round((currentBrutto / totalBrutto) * totalLunch);
   const nextLunch = totalLunch - currentLunch;
+  // Split availability by which side of midnight each period falls
+  let curAvail = 0, nxtAvail = 0;
+  (shift.availability || []).forEach(p => {
+    const lo = Math.max(0, p.start);
+    const hi = Math.max(lo, p.end);
+    const before = Math.max(0, Math.min(hi, TIMELINE_END) - Math.min(lo, TIMELINE_END));
+    const after = Math.max(0, Math.max(hi, TIMELINE_END) - Math.max(lo, TIMELINE_END));
+    if (lastebil) { curAvail += before; nxtAvail += after; }
+  });
   return {
     isSplit: true,
     currentWeekBrutto: currentBrutto,
@@ -162,6 +176,10 @@ function splitShiftAcrossWeeks(shift, dayIdx) {
     nextWeekLunch: nextLunch,
     currentWeekNet: Math.max(0, currentBrutto - currentLunch),
     nextWeekNet: Math.max(0, nextBrutto - nextLunch),
+    currentWeekAvail: curAvail,
+    nextWeekAvail: nxtAvail,
+    currentWeekPaid: Math.max(0, currentBrutto - currentLunch - curAvail),
+    nextWeekPaid: Math.max(0, nextBrutto - nextLunch - nxtAvail),
   };
 }
 
@@ -221,10 +239,31 @@ function lunchMinutes(grossMin) {
 }
 function shiftGross(s) { return s.end - s.start; }
 function shiftNet(s) { return Math.max(0, shiftGross(s) - lunchMinutes(shiftGross(s))); }
+function availabilityMinutes(s) {
+  if (!lastebil || !s.availability || !s.availability.length) return 0;
+  return s.availability.reduce((sum, p) => sum + Math.max(0, p.end - p.start), 0);
+}
+// Paid / "lønnstid": for lastebil with availability, subtract availability;
+// otherwise identical to shiftNet.
+function shiftPaid(s) {
+  return Math.max(0, shiftNet(s) - availabilityMinutes(s));
+}
+// Ensure new fields exist on every shift (migration helper).
+function ensureShiftDefaults(s) {
+  if (!s.availability || !Array.isArray(s.availability)) s.availability = [];
+  return s;
+}
+function migrateAllShifts() {
+  weeks.forEach(w => w.forEach(day => day.forEach(ensureShiftDefaults)));
+}
 
 // ====== FATS validation ======
 function validateFATS() {
-  const result = { broken: [], warnings: [], shiftFlags: {}, weekFlags: {} };
+  const result = {
+    broken: [], warnings: [], shiftFlags: {}, weekFlags: {},
+    reducedRest: {}, // `${wi}-${di}-${si}` -> { n, gapMin, broken }
+    reducedRestSummary: { total: 0, currentCount: 0, breached: 0 },
+  };
   if (!lastebil) { fatsResult = result; return; }
 
   weeks.forEach((week, wi) => {
@@ -234,30 +273,30 @@ function validateFATS() {
     if (wi > 0 && weeks[wi - 1]) {
       (weeks[wi - 1][6] || []).forEach(s => {
         if (s.end > TIMELINE_END) {
-          weekTotal += splitShiftAcrossWeeks(s, 6).nextWeekNet;
+          weekTotal += splitShiftAcrossWeeks(s, 6).nextWeekPaid;
         }
       });
     }
 
-    // Rule 1: per-shift net > 600 min (uses total net)
+    // Rule 1: per-shift arbeidstid > 600 min (10h)
     week.forEach((day, di) => {
       day.forEach((s, si) => {
-        const net = shiftNet(s);
+        const paid = shiftPaid(s);
         const split = splitShiftAcrossWeeks(s, di);
-        weekTotal += split.currentWeekNet;
-        if (net > 600) {
+        weekTotal += split.currentWeekPaid;
+        if (paid > 600) {
           const key = `${wi}-${di}-${si}`;
           result.shiftFlags[key] = 'broken';
           result.broken.push({
             week: wi, dayIdx: di,
             rule: 'shift-10h',
-            text: `Vakt ${DAY_SHORT[di]} er ${(net / 60).toFixed(1)} t (over 10 t)`,
+            text: `Vakt ${DAY_SHORT[di]} er ${(paid / 60).toFixed(1)} t arbeidstid (over 10 t)`,
           });
         }
       });
     });
 
-    // Rule 2: weekly net > 3600 min (uses per-week split portions)
+    // Rule 2: weekly arbeidstid > 3600 min (60h)
     if (weekTotal > 3600) {
       result.weekFlags[wi] = 'broken';
       result.broken.push({
@@ -271,45 +310,75 @@ function validateFATS() {
         });
       });
     }
+  });
 
-    // Rule 3: rest >= 660 between consecutive days (within week)
-    for (let di = 1; di < 7; di++) {
-      if (!week[di].length) continue;
-      const prev = week[di - 1];
-      if (!prev.length) continue;
-      const lastEnd = Math.max(...prev.map(x => x.end));
-      const firstStart = Math.min(...week[di].map(x => x.start));
-      const gap = 1440 + firstStart - lastEnd;
-      if (gap < 660) {
-        const earliestIdx = week[di].reduce((acc, s, i, arr) => s.start < arr[acc].start ? i : acc, 0);
-        result.shiftFlags[`${wi}-${di}-${earliestIdx}`] = 'broken';
+  // Rule 3: chronological reduced daily rest with counter (across all weeks)
+  // Build chronological list of all shifts as absolute minutes from start of turnus.
+  // For cross-week Sunday shifts (end > 1440), we DO NOT duplicate them — their
+  // absEnd already extends into next week's Monday in absolute terms.
+  const allShifts = [];
+  weeks.forEach((week, wi) => {
+    week.forEach((day, di) => {
+      day.forEach((s, si) => {
+        const base = (wi * 7 + di) * 1440;
+        allShifts.push({
+          key: `${wi}-${di}-${si}`,
+          wi, di, si,
+          absStart: base + s.start,
+          absEnd: base + s.end,
+        });
+      });
+    });
+  });
+  allShifts.sort((a, b) => a.absStart - b.absStart);
+
+  let counter = 0;
+  for (let i = 1; i < allShifts.length; i++) {
+    const prev = allShifts[i - 1];
+    const cur = allShifts[i];
+    const gap = cur.absStart - prev.absEnd;
+    if (gap >= 2700) {
+      // ≥ 45h: ukehvile — reset counter
+      counter = 0;
+      continue;
+    }
+    if (gap < 540) {
+      // Hard breach: < 9h rest
+      result.shiftFlags[cur.key] = 'broken';
+      result.broken.push({
+        week: cur.wi, dayIdx: cur.di,
+        rule: 'rest-9h',
+        text: `Hviletid før ${DAY_SHORT[cur.di]} (uke ${weekMeta[cur.wi].num}) er ${(gap / 60).toFixed(1)} t (under 9 t)`,
+      });
+      continue;
+    }
+    if (gap < 660) {
+      // 9–11h: reduced daily rest
+      counter += 1;
+      const broken = counter > 3;
+      result.reducedRest[cur.key] = { n: counter, gapMin: gap, broken };
+      result.reducedRestSummary.total += 1;
+      if (broken) {
+        result.shiftFlags[cur.key] = 'broken';
+        result.reducedRestSummary.breached += 1;
         result.broken.push({
-          week: wi, dayIdx: di,
-          rule: 'rest-11h',
-          text: `Hviletid mellom ${DAY_SHORT[di-1]} og ${DAY_SHORT[di]} er ${(gap / 60).toFixed(1)} t`,
+          week: cur.wi, dayIdx: cur.di,
+          rule: 'rest-reduced',
+          text: `Den ${counter}. reduserte døgnhvilen siden forrige ukehvile før ${DAY_SHORT[cur.di]} (uke ${weekMeta[cur.wi].num}) — maks 3 tillatt`,
+        });
+      } else {
+        result.warnings.push({
+          week: cur.wi, dayIdx: cur.di,
+          rule: 'rest-reduced',
+          text: `Redusert døgnhvil ${counter}/3 før ${DAY_SHORT[cur.di]} (uke ${weekMeta[cur.wi].num}): ${(gap / 60).toFixed(1)} t`,
         });
       }
     }
+    // gap >= 660: normal rest, no marker, counter unchanged
+  }
+  result.reducedRestSummary.currentCount = counter;
 
-    // Rule 3 cross-week: prev Sunday shift end vs this week's Monday
-    if (wi > 0 && weeks[wi - 1]) {
-      (weeks[wi - 1][6] || []).forEach(s => {
-        if (s.end > TIMELINE_END && week[0].length > 0) {
-          const contEnd = s.end - TIMELINE_END;
-          const firstStart = Math.min(...week[0].map(x => x.start));
-          const gap = firstStart - contEnd;
-          if (gap < 660) {
-            const earliestIdx = week[0].reduce((acc, sh, i, arr) => sh.start < arr[acc].start ? i : acc, 0);
-            result.shiftFlags[`${wi}-0-${earliestIdx}`] = 'broken';
-            result.broken.push({
-              week: wi, dayIdx: 0,
-              rule: 'rest-11h',
-              text: `Hviletid mellom Søn (uke ${weekMeta[wi-1].num}) og Man er ${(gap / 60).toFixed(1)} t`,
-            });
-          }
-        }
-      });
-    }
+  weeks.forEach((week, wi) => {
 
     // Rule 4: largest gap in week >= 1440
     const all = [];
@@ -397,11 +466,11 @@ function initDefaults() {
   const first = addWeeksToIso(today.num, today.year, 2);
   weekMeta = [{ num: first.num, year: first.year }];
   weeks = [emptyWeek()];
-  weeks[0][0] = [{ start: 7 * 60, end: 15 * 60 + 30 }];
-  weeks[0][1] = [{ start: 7 * 60, end: 15 * 60 + 30 }];
-  weeks[0][2] = [{ start: 7 * 60, end: 15 * 60 + 30 }];
-  weeks[0][3] = [{ start: 7 * 60, end: 15 * 60 + 30 }];
-  weeks[0][4] = [{ start: 7 * 60, end: 15 * 60 }];
+  weeks[0][0] = [{ start: 7 * 60, end: 15 * 60 + 30, availability: [] }];
+  weeks[0][1] = [{ start: 7 * 60, end: 15 * 60 + 30, availability: [] }];
+  weeks[0][2] = [{ start: 7 * 60, end: 15 * 60 + 30, availability: [] }];
+  weeks[0][3] = [{ start: 7 * 60, end: 15 * 60 + 30, availability: [] }];
+  weeks[0][4] = [{ start: 7 * 60, end: 15 * 60, availability: [] }];
   activeWeek = 0;
   formData.avdeling = 'Bergen Distribusjon';
   formData.avdelingsleder = 'Ingrid Solheim';
@@ -596,6 +665,36 @@ function renderDateRange() {
   }
 }
 
+// Build availability stripe spans for the portion of a shift in [portionStart..portionEnd]
+function availabilityStripesHtml(s, portionStart, portionEnd) {
+  if (!lastebil || !s.availability || !s.availability.length) return '';
+  const span = portionEnd - portionStart;
+  if (span <= 0) return '';
+  return s.availability.map(p => {
+    const lo = Math.max(p.start, portionStart);
+    const hi = Math.min(p.end, portionEnd);
+    if (hi <= lo) return '';
+    const left = ((lo - portionStart) / span) * 100;
+    const width = ((hi - lo) / span) * 100;
+    return `<span class="shift-availability" style="left:${left}%; width:${width}%" aria-hidden="true"></span>`;
+  }).join('');
+}
+function reducedRestBadgeHtml(key) {
+  if (!lastebil) return '';
+  const info = fatsResult.reducedRest && fatsResult.reducedRest[key];
+  if (!info) return '';
+  const cls = info.broken ? 'shift-rest-badge broken' : 'shift-rest-badge';
+  const hours = (info.gapMin / 60).toFixed(1).replace('.', ',');
+  const title = info.broken
+    ? `Dette er den ${info.n}. reduserte døgnhvilen siden forrige ukehvile — maks 3 tillatt. FATS-brudd.`
+    : `Redusert døgnhvil ${info.n}/3 siden forrige ukehvile (${hours} timer fra forrige vakt)`;
+  return `<span class="${cls}" title="${title}">9t</span>`;
+}
+function addAvailButtonHtml() {
+  if (!lastebil) return '';
+  return `<button type="button" class="shift-add-avail" data-add-avail aria-label="Legg til tilgjengelighetstid" title="Legg til tilgjengelighetstid">⊕</button>`;
+}
+
 function renderTimeline() {
   const root = document.getElementById('timeline');
   root.innerHTML = '';
@@ -658,6 +757,10 @@ function renderTimeline() {
       const isBroken = fatsResult.shiftFlags[`${activeWeek}-${di}-${si}`] === 'broken';
       const isSplit = s.end > TIMELINE_END;
 
+      const shiftKey = `${activeWeek}-${di}-${si}`;
+      const restBadge = reducedRestBadgeHtml(shiftKey);
+      const plusBtn = addAvailButtonHtml();
+
       if (isSplit) {
         // Start block: start → midnight
         const startBlock = document.createElement('div');
@@ -668,9 +771,12 @@ function renderTimeline() {
         startBlock.dataset.idx = si;
         startBlock.dataset.role = 'split-start';
         startBlock.innerHTML = `
+          ${availabilityStripesHtml(s, s.start, TIMELINE_END)}
+          ${restBadge}
           <span class="shift-label"><i class="label-dot"></i>${cat.toUpperCase()}</span>
           <span class="shift-time">${minutesToHHMM(s.start)} –</span>
           ${isBroken ? '<span class="shift-warn">⚠</span>' : ''}
+          ${plusBtn}
           <span class="shift-handle left" data-handle="start">⋮</span>
           <span class="shift-chain" title="Fortsetter neste dag">↪</span>`;
         track.appendChild(startBlock);
@@ -687,9 +793,12 @@ function renderTimeline() {
         block.dataset.day = di;
         block.dataset.idx = si;
         block.innerHTML = `
+          ${availabilityStripesHtml(s, s.start, s.end)}
+          ${restBadge}
           <span class="shift-label"><i class="label-dot"></i>${cat.toUpperCase()}</span>
           <span class="shift-time">${minutesToHHMM(s.start)} – ${minutesToHHMM(s.end)}</span>
           ${isBroken ? '<span class="shift-warn">⚠</span>' : ''}
+          ${plusBtn}
           <span class="shift-handle left" data-handle="start">⋮</span>
           <span class="shift-handle right" data-handle="end">⋮</span>`;
         track.appendChild(block);
@@ -750,14 +859,18 @@ function renderDetailList() {
   const root = document.getElementById('detail-list');
   const week = weeks[activeWeek] || emptyWeek();
   const rows = [];
-  let total = 0;
+  let totalNet = 0;
+  let totalAvail = 0;
+  let totalPaid = 0;
 
   // Cross-week continuation from previous week's Sunday
   if (activeWeek > 0 && weeks[activeWeek - 1]) {
     (weeks[activeWeek - 1][6] || []).forEach((s, si) => {
       if (s.end > TIMELINE_END) {
         const split = splitShiftAcrossWeeks(s, 6);
-        total += split.nextWeekNet;
+        totalNet += split.nextWeekNet;
+        totalAvail += split.nextWeekAvail;
+        totalPaid += split.nextWeekPaid;
         const broken = fatsResult.shiftFlags[`${activeWeek - 1}-6-${si}`] === 'broken';
         const prevUkeNum = weekMeta[activeWeek - 1] ? weekMeta[activeWeek - 1].num : '?';
         rows.push({
@@ -766,6 +879,8 @@ function renderDetailList() {
           endLabel: minutesToHHMM(s.end),
           lunch: split.nextWeekLunch,
           net: split.nextWeekNet,
+          avail: split.nextWeekAvail,
+          paid: split.nextWeekPaid,
           broken,
           note: `Fra uke ${prevUkeNum}`,
           delKey: null,
@@ -779,7 +894,9 @@ function renderDetailList() {
   for (let di = 0; di < 7; di++) {
     week[di].forEach((s, si) => {
       const split = splitShiftAcrossWeeks(s, di);
-      total += split.currentWeekNet;
+      totalNet += split.currentWeekNet;
+      totalAvail += split.currentWeekAvail;
+      totalPaid += split.currentWeekPaid;
       const broken = fatsResult.shiftFlags[`${activeWeek}-${di}-${si}`] === 'broken';
       const isSundayCW = isSundayCrossWeek(s, di);
       let dayLabel;
@@ -797,6 +914,8 @@ function renderDetailList() {
         endLabel: minutesToHHMM(s.end),
         lunch: split.currentWeekLunch,
         net: split.currentWeekNet,
+        avail: split.currentWeekAvail,
+        paid: split.currentWeekPaid,
         broken,
         note: isSundayCW && nextUkeNum ? `Fortsetter i uke ${nextUkeNum}` : null,
         delKey: `${di}-${si}`,
@@ -810,30 +929,71 @@ function renderDetailList() {
     root.innerHTML = `<div class="detail-empty">Ingen vakter denne uken. Klikk og dra på tidslinjen for å lage en.</div>`;
     return;
   }
-  let html = `<table>
-    <thead>
-      <tr><th>Dag</th><th>Start</th><th>Slutt</th><th>Lunsj</th><th>Nettotid</th><th></th></tr>
-    </thead>
-    <tbody>`;
-  rows.forEach(r => {
-    const noteHtml = r.note ? `<span class="shift-note" title="${r.note}">↕</span>` : '';
-    const delHtml = r.delKey
-      ? `<button class="delete-btn" data-del="${r.delKey}" aria-label="Slett vakt">×</button>`
-      : `<button class="delete-btn" data-del-cross="${r.crossWeekOrigin}-6-${r.crossWeekSi}" aria-label="Slett vakt">×</button>`;
-    html += `<tr class="${r.broken ? 'row-broken' : ''}">
-      <td>${r.dayLabel}${noteHtml}</td>
-      <td class="mono">${r.startLabel}</td>
-      <td class="mono">${r.endLabel}</td>
-      <td class="mono">${r.lunch} min</td>
-      <td class="mono">${(r.net / 60).toFixed(2)} t</td>
-      <td>${delHtml}</td>
-    </tr>`;
-  });
-  html += `</tbody>
-    <tfoot>
-      <tr><td colspan="4" style="text-align:right; font-weight:600;">Sum uke:</td><td class="mono" style="font-weight:600;">${(total / 60).toFixed(2)} t</td><td></td></tr>
-    </tfoot>
-  </table>`;
+  const showFats = !!lastebil;
+  const fmtHrMin = mins => {
+    if (!mins) return '0 t';
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return m === 0 ? `${h} t` : `${h} t ${m} min`;
+  };
+  let html;
+  if (showFats) {
+    html = `<table>
+      <thead>
+        <tr><th>Dag</th><th>Start</th><th>Slutt</th><th>Lunsj</th><th>Tilgjengelighet</th><th>Arbeidstid</th><th>Lønnstid</th><th></th></tr>
+      </thead>
+      <tbody>`;
+    rows.forEach(r => {
+      const noteHtml = r.note ? `<span class="shift-note" title="${r.note}">↕</span>` : '';
+      const delHtml = r.delKey
+        ? `<button class="delete-btn" data-del="${r.delKey}" aria-label="Slett vakt">×</button>`
+        : `<button class="delete-btn" data-del-cross="${r.crossWeekOrigin}-6-${r.crossWeekSi}" aria-label="Slett vakt">×</button>`;
+      html += `<tr class="${r.broken ? 'row-broken' : ''}">
+        <td>${r.dayLabel}${noteHtml}</td>
+        <td class="mono">${r.startLabel}</td>
+        <td class="mono">${r.endLabel}</td>
+        <td class="mono">${r.lunch} min</td>
+        <td class="mono">${r.avail ? fmtHrMin(r.avail) : ''}</td>
+        <td class="mono">${(r.paid / 60).toFixed(2)} t</td>
+        <td class="mono">${(r.paid / 60).toFixed(2)} t</td>
+        <td>${delHtml}</td>
+      </tr>`;
+    });
+    html += `</tbody>
+      <tfoot>
+        <tr><td colspan="4" style="text-align:right; font-weight:600;">Sum uke:</td>
+        <td class="mono" style="font-weight:600;">${totalAvail ? fmtHrMin(totalAvail) : ''}</td>
+        <td class="mono" style="font-weight:600;">${(totalPaid / 60).toFixed(2)} t</td>
+        <td class="mono" style="font-weight:600;">${(totalPaid / 60).toFixed(2)} t</td>
+        <td></td></tr>
+      </tfoot>
+    </table>`;
+  } else {
+    html = `<table>
+      <thead>
+        <tr><th>Dag</th><th>Start</th><th>Slutt</th><th>Lunsj</th><th>Nettotid</th><th></th></tr>
+      </thead>
+      <tbody>`;
+    rows.forEach(r => {
+      const noteHtml = r.note ? `<span class="shift-note" title="${r.note}">↕</span>` : '';
+      const delHtml = r.delKey
+        ? `<button class="delete-btn" data-del="${r.delKey}" aria-label="Slett vakt">×</button>`
+        : `<button class="delete-btn" data-del-cross="${r.crossWeekOrigin}-6-${r.crossWeekSi}" aria-label="Slett vakt">×</button>`;
+      html += `<tr class="${r.broken ? 'row-broken' : ''}">
+        <td>${r.dayLabel}${noteHtml}</td>
+        <td class="mono">${r.startLabel}</td>
+        <td class="mono">${r.endLabel}</td>
+        <td class="mono">${r.lunch} min</td>
+        <td class="mono">${(r.net / 60).toFixed(2)} t</td>
+        <td>${delHtml}</td>
+      </tr>`;
+    });
+    html += `</tbody>
+      <tfoot>
+        <tr><td colspan="4" style="text-align:right; font-weight:600;">Sum uke:</td><td class="mono" style="font-weight:600;">${(totalNet / 60).toFixed(2)} t</td><td></td></tr>
+      </tfoot>
+    </table>`;
+  }
   root.innerHTML = html;
   root.querySelectorAll('[data-del]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -854,7 +1014,7 @@ function renderDetailList() {
 }
 
 function renderSummary() {
-  const totalMin = weeks.reduce((sum, w) => sum + w.reduce((s, day) => s + day.reduce((a, sh) => a + shiftNet(sh), 0), 0), 0);
+  const totalMin = weeks.reduce((sum, w) => sum + w.reduce((s, day) => s + day.reduce((a, sh) => a + shiftPaid(sh), 0), 0), 0);
   const numWeeks = weeks.length || 1;
   const avgPerWeekMin = totalMin / numWeeks;
   const pct = (avgPerWeekMin / 60) / 37.5 * 100;
@@ -895,23 +1055,40 @@ function renderFatsPanel() {
   const panel = document.getElementById('fats-panel');
   const list = document.getElementById('fats-list');
   const counter = document.getElementById('fats-count');
-  if (!lastebil || (fatsResult.broken.length === 0 && fatsResult.warnings.length === 0)) {
+  const summary = fatsResult.reducedRestSummary || { total: 0, currentCount: 0, breached: 0 };
+  const showSummary = lastebil && summary.total > 0;
+  if (!lastebil || (fatsResult.broken.length === 0 && fatsResult.warnings.length === 0 && !showSummary)) {
     panel.hidden = true;
     return;
   }
   panel.hidden = false;
   counter.textContent = `${fatsResult.broken.length} brudd · ${fatsResult.warnings.length} advarsler`;
   list.innerHTML = '';
+
+  if (showSummary) {
+    const isBreach = summary.currentCount > 3;
+    const div = document.createElement('div');
+    div.className = 'fats-item ' + (isBreach ? 'broken' : 'warn');
+    const usedLabel = Math.min(summary.currentCount, 3);
+    const status = isBreach
+      ? `<strong>FATS-brudd: ${summary.currentCount} reduserte døgnhviler siden forrige ukehvile (maks 3 tillatt)</strong><span>Totalt ${summary.total} reduserte døgnhviler i turnusen</span>`
+      : `<strong>Redusert døgnhvil brukt: ${usedLabel}/3</strong><span>Totalt ${summary.total} reduserte døgnhviler i turnusen siden forrige ukehvile</span>`;
+    div.innerHTML = `<span class="icon">⓵</span><div class="body">${status}</div>`;
+    list.appendChild(div);
+  }
+
   const ruleTitle = {
     'shift-10h': 'Vakt over 10 timer',
     'week-60h': 'Over 60 timer i uka',
+    'rest-9h': 'Hviletid under 9 timer',
     'rest-11h': 'Hviletid under 11 timer',
+    'rest-reduced': 'Redusert døgnhvil',
     'rest-24h': 'Mangler 24 t sammenhengende hvile',
   };
   const renderItem = (item, type) => {
     const div = document.createElement('div');
     div.className = 'fats-item ' + (type === 'broken' ? 'broken' : 'warn');
-    div.innerHTML = `<span class="icon">⚠</span><div class="body"><strong>Uke ${weekMeta[item.week].num} · ${ruleTitle[item.rule]}</strong><span>${item.text}</span></div>`;
+    div.innerHTML = `<span class="icon">⚠</span><div class="body"><strong>Uke ${weekMeta[item.week].num} · ${ruleTitle[item.rule] || item.rule}</strong><span>${item.text}</span></div>`;
     div.addEventListener('click', () => { activeWeek = item.week; renderAll(); });
     list.appendChild(div);
   };
@@ -1006,6 +1183,7 @@ function wireTimeline() {
   const root = document.getElementById('timeline');
   root.addEventListener('mousedown', e => {
     if (isMobile()) return;
+    if (e.target.closest('[data-add-avail]')) return; // let click handler handle it
     const handle = e.target.closest('.shift-handle');
     const shiftEl = e.target.closest('.shift');
     const track = e.target.closest('.day-track');
@@ -1050,7 +1228,7 @@ function wireTimeline() {
       e.preventDefault();
     } else {
       const startMin = snap(clamp(pxToMinutes(track, e.clientX - rect.left), 0, TIMELINE_END - MIN_SHIFT));
-      const newShift = { start: startMin, end: startMin + MIN_SHIFT };
+      const newShift = { start: startMin, end: startMin + MIN_SHIFT, availability: [] };
       weeks[activeWeek][trackDi].push(newShift);
       const si = weeks[activeWeek][trackDi].length - 1;
       drag = { mode: 'resize-end', weekIdx: activeWeek, dayIdx: trackDi, shiftIdx: si,
@@ -1100,6 +1278,11 @@ function wireTimeline() {
       shift.end = snap(shift.end);
       if (shift.end - shift.start < MIN_SHIFT) {
         weeks[drag.weekIdx][drag.dayIdx].splice(drag.shiftIdx, 1);
+      } else if (shift.availability && shift.availability.length) {
+        // Trim/drop availability periods that no longer fit within the shift
+        shift.availability = shift.availability
+          .map(p => ({ start: Math.max(p.start, shift.start), end: Math.min(p.end, shift.end) }))
+          .filter(p => p.end - p.start >= SNAP);
       }
     }
     maybeCreateNextWeekForCrossWeekShifts();
@@ -1108,8 +1291,30 @@ function wireTimeline() {
     renderAll();
   });
 
-  // Touch / mobile: open modal on click
+  // Plus-button click (availability): handle both desktop and mobile
   root.addEventListener('click', e => {
+    const addBtn = e.target.closest('[data-add-avail]');
+    if (addBtn) {
+      const shiftEl = addBtn.closest('.shift');
+      if (!shiftEl) return;
+      const role = shiftEl.dataset.role;
+      let di, weekIdx;
+      if (role === 'continuation') {
+        di = parseInt(shiftEl.dataset.originDay);
+        weekIdx = activeWeek;
+      } else if (role === 'cross-week-cont') {
+        di = 6;
+        weekIdx = parseInt(shiftEl.dataset.originWeek);
+      } else {
+        di = parseInt(shiftEl.dataset.day);
+        weekIdx = activeWeek;
+      }
+      const si = parseInt(shiftEl.dataset.idx);
+      e.stopPropagation();
+      e.preventDefault();
+      openAvailabilityModal(weekIdx, di, si);
+      return;
+    }
     if (!isMobile()) return;
     const track = e.target.closest('.day-track');
     if (!track) return;
@@ -1168,7 +1373,7 @@ function openShiftModal(di) {
       addBtn.className = 'btn btn-primary btn-block';
       addBtn.textContent = '+ Legg til ny vakt';
       addBtn.addEventListener('click', () => {
-        shifts.push({ start: 7 * 60, end: 15 * 60 });
+        shifts.push({ start: 7 * 60, end: 15 * 60, availability: [] });
         editIdx = shifts.length - 1;
         render();
       });
@@ -1215,6 +1420,151 @@ function openShiftModal(di) {
     const sel = document.createElement('select');
     const max = allowNextDay ? 2 * TIMELINE_END : TIMELINE_END;
     for (let m = 0; m <= max; m += SNAP) {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = minutesToHHMM(m);
+      if (m === value) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', () => onChange(parseInt(sel.value)));
+    wrap.appendChild(t);
+    wrap.appendChild(sel);
+    return wrap;
+  }
+
+  function closeModal() { backdrop.hidden = true; renderAll(); }
+  document.getElementById('modal-close').onclick = closeModal;
+  backdrop.hidden = false;
+  render();
+}
+
+// ====== Modal for availability time ======
+function openAvailabilityModal(weekIdx, dayIdx, shiftIdx) {
+  const backdrop = document.getElementById('modal-backdrop');
+  const title = document.getElementById('modal-title');
+  const body = document.getElementById('modal-body');
+  const foot = document.getElementById('modal-foot');
+  const shift = weeks[weekIdx] && weeks[weekIdx][dayIdx] && weeks[weekIdx][dayIdx][shiftIdx];
+  if (!shift) return;
+  ensureShiftDefaults(shift);
+  const shiftMaxEnd = shift.end > TIMELINE_END ? shift.end : shift.end;
+  title.textContent = `Tilgjengelighetstid for ${DAY_NAMES[dayIdx]} ${minutesToHHMM(shift.start)}–${minutesToHHMM(shift.end)}`;
+
+  let draftStart = shift.start;
+  let draftEnd = shift.start + 60;
+  if (draftEnd > shiftMaxEnd) draftEnd = shiftMaxEnd;
+  let errorMsg = '';
+
+  function fmtHrMin(mins) {
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return m === 0 ? `${h} t` : `${h} t ${m} min`;
+  }
+  function overlapsExisting(start, end, skipIdx) {
+    return (shift.availability || []).some((p, i) => {
+      if (i === skipIdx) return false;
+      return start < p.end && end > p.start;
+    });
+  }
+  function validate(start, end) {
+    if (end <= start) return 'Sluttid må være etter starttid';
+    if (start < shift.start || end > shiftMaxEnd) return 'Perioden må ligge innenfor vakten';
+    if (overlapsExisting(start, end)) return 'Perioden overlapper med en annen tilgjengelighetsperiode';
+    return '';
+  }
+
+  function render() {
+    body.innerHTML = '';
+
+    // Description
+    const desc = document.createElement('p');
+    desc.style.color = 'var(--color-text-muted)';
+    desc.style.fontSize = '13px';
+    desc.style.margin = '0 0 12px';
+    desc.textContent = 'Tilgjengelighetstid er ventetid som ikke regnes som arbeids- eller lønnstid (ferge, lossing, grensekontroll).';
+    body.appendChild(desc);
+
+    // Existing periods
+    const list = document.createElement('div');
+    list.className = 'modal-shift-list';
+    if (!shift.availability.length) {
+      const empty = document.createElement('p');
+      empty.style.color = 'var(--color-text-muted)';
+      empty.style.fontSize = '13px';
+      empty.textContent = 'Ingen tilgjengelighetsperioder ennå.';
+      list.appendChild(empty);
+    }
+    shift.availability.forEach((p, i) => {
+      const row = document.createElement('div');
+      row.className = 'modal-shift-row';
+      row.innerHTML = `<span class="grow mono">${minutesToHHMM(p.start)} – ${minutesToHHMM(p.end)}</span><span class="mono" style="color:var(--color-text-muted); font-size:12px;">${fmtHrMin(p.end - p.start)}</span>`;
+      const del = document.createElement('button');
+      del.className = 'btn btn-outline btn-sm';
+      del.textContent = '×';
+      del.setAttribute('aria-label', 'Slett periode');
+      del.addEventListener('click', () => {
+        shift.availability.splice(i, 1);
+        scheduleSave();
+        render();
+      });
+      row.appendChild(del);
+      list.appendChild(row);
+    });
+    body.appendChild(list);
+
+    // Add new period section
+    const addSection = document.createElement('div');
+    addSection.className = 'avail-add-section';
+    const heading = document.createElement('h4');
+    heading.textContent = 'Legg til ny periode';
+    heading.style.cssText = 'margin:16px 0 8px; font-size:13px; color:var(--color-text-muted); text-transform:uppercase; letter-spacing:0.5px;';
+    addSection.appendChild(heading);
+
+    const row = document.createElement('div');
+    row.className = 'modal-time-row';
+    row.appendChild(makeAvailTimeSelect('Starttid', draftStart, v => { draftStart = v; if (draftEnd <= draftStart) draftEnd = Math.min(draftStart + SNAP, shiftMaxEnd); errorMsg = ''; render(); }));
+    row.appendChild(makeAvailTimeSelect('Sluttid', draftEnd, v => { draftEnd = v; if (draftEnd <= draftStart) draftStart = Math.max(draftEnd - SNAP, shift.start); errorMsg = ''; render(); }));
+    addSection.appendChild(row);
+
+    if (errorMsg) {
+      const err = document.createElement('p');
+      err.style.cssText = 'color:#dc2626; font-size:13px; margin:8px 0 0;';
+      err.textContent = errorMsg;
+      addSection.appendChild(err);
+    }
+
+    const addBtn = document.createElement('button');
+    addBtn.className = 'btn btn-primary btn-block';
+    addBtn.textContent = '+ Legg til periode';
+    addBtn.style.marginTop = '12px';
+    addBtn.addEventListener('click', () => {
+      const err = validate(draftStart, draftEnd);
+      if (err) { errorMsg = err; render(); return; }
+      shift.availability.push({ start: draftStart, end: draftEnd });
+      shift.availability.sort((a, b) => a.start - b.start);
+      errorMsg = '';
+      draftStart = shift.start;
+      draftEnd = Math.min(shift.start + 60, shiftMaxEnd);
+      scheduleSave();
+      render();
+    });
+    addSection.appendChild(addBtn);
+    body.appendChild(addSection);
+
+    foot.innerHTML = '';
+    const close = document.createElement('button');
+    close.className = 'btn btn-outline';
+    close.textContent = 'Lukk';
+    close.addEventListener('click', closeModal);
+    foot.appendChild(close);
+  }
+
+  function makeAvailTimeSelect(label, value, onChange) {
+    const wrap = document.createElement('label');
+    const t = document.createElement('span');
+    t.textContent = label;
+    const sel = document.createElement('select');
+    for (let m = shift.start; m <= shiftMaxEnd; m += SNAP) {
       const opt = document.createElement('option');
       opt.value = m;
       opt.textContent = minutesToHHMM(m);
@@ -1299,7 +1649,7 @@ function generatePDF() {
   y += 4;
 
   // Stillingsprosent
-  const totalMin = weeks.reduce((sum, w) => sum + w.reduce((s, day) => s + day.reduce((a, sh) => a + shiftNet(sh), 0), 0), 0);
+  const totalMin = weeks.reduce((sum, w) => sum + w.reduce((s, day) => s + day.reduce((a, sh) => a + shiftPaid(sh), 0), 0), 0);
   const numWeeks = weeks.length || 1;
   const avg = totalMin / numWeeks / 60;
   const pct = (avg / 37.5) * 100;
@@ -1342,17 +1692,31 @@ function generatePDF() {
     y += 6;
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9);
-    const cols = [margin, margin + 30, margin + 60, margin + 90, margin + 130];
+    const fatsPdf = !!lastebil;
+    const cols = fatsPdf
+      ? [margin, margin + 28, margin + 46, margin + 64, margin + 86, margin + 116, margin + 148]
+      : [margin, margin + 30, margin + 60, margin + 90, margin + 130];
     doc.setFillColor(241, 245, 249);
     doc.rect(margin, y - 4, pageW - margin * 2, 6, 'F');
     doc.setTextColor(100, 116, 139);
-    ['Dag', 'Start', 'Slutt', 'Lunsj', 'Nettotid'].forEach((h, i) => doc.text(h, cols[i], y));
+    const headers = fatsPdf
+      ? ['Dag', 'Start', 'Slutt', 'Lunsj', 'Tilgjeng.', 'Arbeidstid', 'Lønnstid']
+      : ['Dag', 'Start', 'Slutt', 'Lunsj', 'Nettotid'];
+    headers.forEach((h, i) => doc.text(h, cols[i], y));
     y += 4;
     doc.setTextColor(15, 23, 42);
     doc.setFont('helvetica', 'normal');
-    let weekTotal = 0;
+    let weekTotalNet = 0;
+    let weekTotalAvail = 0;
+    let weekTotalPaid = 0;
     let hasAny = false;
     const footnotes = [];
+    const fmtHrMinShort = mins => {
+      if (!mins) return '';
+      const h = Math.floor(mins / 60);
+      const m = mins % 60;
+      return m === 0 ? `${h} t` : `${h} t ${m} m`;
+    };
 
     // Cross-week continuation from prev week's Sunday
     if (wi > 0 && weeks[wi - 1]) {
@@ -1361,7 +1725,9 @@ function generatePDF() {
           hasAny = true;
           if (y > pageH - 25) { doc.addPage(); y = margin; }
           const split = splitShiftAcrossWeeks(s, 6);
-          weekTotal += split.nextWeekNet;
+          weekTotalNet += split.nextWeekNet;
+          weekTotalAvail += split.nextWeekAvail;
+          weekTotalPaid += split.nextWeekPaid;
           const prevUkeNum = weekMeta[wi - 1] ? weekMeta[wi - 1].num : '?';
           const note = `* Fra uke ${prevUkeNum}`;
           footnotes.push(note);
@@ -1369,7 +1735,13 @@ function generatePDF() {
           doc.text(minutesToHHMM(s.start), cols[1], y);
           doc.text(minutesToHHMM(s.end), cols[2], y);
           doc.text(`${split.nextWeekLunch} min`, cols[3], y);
-          doc.text(`${(split.nextWeekNet / 60).toFixed(2)} t`, cols[4], y);
+          if (fatsPdf) {
+            doc.text(fmtHrMinShort(split.nextWeekAvail), cols[4], y);
+            doc.text(`${(split.nextWeekPaid / 60).toFixed(2)} t`, cols[5], y);
+            doc.text(`${(split.nextWeekPaid / 60).toFixed(2)} t`, cols[6], y);
+          } else {
+            doc.text(`${(split.nextWeekNet / 60).toFixed(2)} t`, cols[4], y);
+          }
           y += 5;
         }
       });
@@ -1380,7 +1752,9 @@ function generatePDF() {
         hasAny = true;
         if (y > pageH - 25) { doc.addPage(); y = margin; }
         const split = splitShiftAcrossWeeks(s, di);
-        weekTotal += split.currentWeekNet;
+        weekTotalNet += split.currentWeekNet;
+        weekTotalAvail += split.currentWeekAvail;
+        weekTotalPaid += split.currentWeekPaid;
         const isSundayCW = isSundayCrossWeek(s, di);
         let pdfDayName;
         if (isSundayCW) {
@@ -1396,7 +1770,13 @@ function generatePDF() {
         doc.text(minutesToHHMM(s.start), cols[1], y);
         doc.text(minutesToHHMM(s.end), cols[2], y);
         doc.text(`${split.currentWeekLunch} min`, cols[3], y);
-        doc.text(`${(split.currentWeekNet / 60).toFixed(2)} t`, cols[4], y);
+        if (fatsPdf) {
+          doc.text(fmtHrMinShort(split.currentWeekAvail), cols[4], y);
+          doc.text(`${(split.currentWeekPaid / 60).toFixed(2)} t`, cols[5], y);
+          doc.text(`${(split.currentWeekPaid / 60).toFixed(2)} t`, cols[6], y);
+        } else {
+          doc.text(`${(split.currentWeekNet / 60).toFixed(2)} t`, cols[4], y);
+        }
         y += 5;
       });
     }
@@ -1407,7 +1787,11 @@ function generatePDF() {
       y += 5;
     }
     doc.setFont('helvetica', 'bold');
-    doc.text(`Sum uke: ${(weekTotal / 60).toFixed(2)} t`, cols[4] - 14, y + 2);
+    if (fatsPdf) {
+      doc.text(`Sum: ${fmtHrMinShort(weekTotalAvail) || '0'} / ${(weekTotalPaid / 60).toFixed(2)} t / ${(weekTotalPaid / 60).toFixed(2)} t`, cols[4], y + 2);
+    } else {
+      doc.text(`Sum uke: ${(weekTotalNet / 60).toFixed(2)} t`, cols[4] - 14, y + 2);
+    }
     doc.setFont('helvetica', 'normal');
     y += 6;
     if (footnotes.length > 0) {
@@ -1569,6 +1953,7 @@ function maybeShowRestoreBanner() {
     activeWeek = clamp(draft.activeWeek || 0, 0, weeks.length - 1);
     lastebil = !!draft.lastebil;
     formData = { ...formData, ...(draft.formData || {}) };
+    migrateAllShifts();
     banner.hidden = true;
     renderAll();
     toast('Utkastet ble gjenopprettet');
