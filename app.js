@@ -176,13 +176,16 @@ function validateFATS() {
     week.forEach((day, di) => {
       day.forEach(s => all.push({ s: di * 1440 + s.start, e: di * 1440 + s.end }));
     });
-    if (all.length >= 2) {
+    if (all.length >= 1) {
       all.sort((a, b) => a.s - b.s);
-      let maxGap = 0;
+      // include rest before first shift and after last shift within the week
+      let maxGap = all[0].s; // gap from Mon 00:00 to first shift start
       for (let i = 1; i < all.length; i++) {
         const g = all[i].s - all[i - 1].e;
         if (g > maxGap) maxGap = g;
       }
+      const gapAfter = 7 * 1440 - all[all.length - 1].e; // gap from last shift end to Sun 23:59
+      if (gapAfter > maxGap) maxGap = gapAfter;
       if (maxGap < 1440) {
         if (!result.weekFlags[wi]) result.weekFlags[wi] = 'warn';
         result.warnings.push({
