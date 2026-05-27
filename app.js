@@ -672,6 +672,10 @@ function renderDateRange() {
 }
 
 // Build availability stripe spans for the portion of a shift in [portionStart..portionEnd]
+function addDuplicateButtonHtml() {
+  return `<button type="button" class="shift-duplicate" data-duplicate aria-label="Dupliser vakt til neste dag" title="Dupliser til neste dag">↓</button>`;
+}
+
 function availabilityStripesHtml(s, portionStart, portionEnd) {
   if (!lastebil || !s.availability || !s.availability.length) return '';
   const span = portionEnd - portionStart;
@@ -764,13 +768,15 @@ function renderTimeline() {
       const isSplit = s.end > TIMELINE_END;
 
       const shiftKey = `${activeWeek}-${di}-${si}`;
+      const isDragSource = drag.mode === 'move' && drag.weekIdx === activeWeek && drag.dayIdx === di && drag.shiftIdx === si && drag.targetDi !== di;
       const restBadge = reducedRestBadgeHtml(shiftKey);
       const plusBtn = addAvailButtonHtml();
+      const dupBtn = addDuplicateButtonHtml();
 
       if (isSplit) {
         // Start block: start → midnight
         const startBlock = document.createElement('div');
-        startBlock.className = `shift shift-${cat} shift-split-start${isBroken ? ' broken' : ''}`;
+        startBlock.className = `shift shift-${cat} shift-split-start${isBroken ? ' broken' : ''}${isDragSource ? ' drag-source' : ''}`;
         startBlock.style.left = ((s.start / TIMELINE_END) * 100) + '%';
         startBlock.style.width = (((TIMELINE_END - s.start) / TIMELINE_END) * 100) + '%';
         startBlock.dataset.day = di;
@@ -793,7 +799,7 @@ function renderTimeline() {
       } else {
         // Normal single block
         const block = document.createElement('div');
-        block.className = `shift shift-${cat}${isBroken ? ' broken' : ''}`;
+        block.className = `shift shift-${cat}${isBroken ? ' broken' : ''}${isDragSource ? ' drag-source' : ''}`;
         block.style.left = ((s.start / TIMELINE_END) * 100) + '%';
         block.style.width = (((s.end - s.start) / TIMELINE_END) * 100) + '%';
         block.dataset.day = di;
@@ -804,6 +810,7 @@ function renderTimeline() {
           <span class="shift-label"><i class="label-dot"></i>${cat.toUpperCase()}</span>
           <span class="shift-time">${minutesToHHMM(s.start)} – ${minutesToHHMM(s.end)}</span>
           ${isBroken ? '<span class="shift-warn">⚠</span>' : ''}
+          ${dupBtn}
           ${plusBtn}
           <span class="shift-handle left" data-handle="start">⋮</span>
           <span class="shift-handle right" data-handle="end">⋮</span>`;
@@ -859,6 +866,22 @@ function renderTimeline() {
       <span class="shift-handle right" data-handle="end">⋮</span>`;
     targetTrack.appendChild(block);
   });
+
+  // Cross-day drag ghost: show preview in target row
+  if (drag.mode === 'move' && drag.targetDi !== undefined && drag.targetDi !== drag.dayIdx) {
+    const dragShift = weeks[drag.weekIdx] && weeks[drag.weekIdx][drag.dayIdx] && weeks[drag.weekIdx][drag.dayIdx][drag.shiftIdx];
+    if (dragShift) {
+      const targetTrack = root.querySelector(`.day-track[data-day="${drag.targetDi}"]`);
+      if (targetTrack) {
+        const ghost = document.createElement('div');
+        ghost.className = 'shift shift-ghost';
+        ghost.style.left = ((dragShift.start / TIMELINE_END) * 100) + '%';
+        ghost.style.width = (((dragShift.end - dragShift.start) / TIMELINE_END) * 100) + '%';
+        ghost.innerHTML = `<span class="shift-time">${minutesToHHMM(dragShift.start)} – ${minutesToHHMM(dragShift.end)}</span>`;
+        targetTrack.appendChild(ghost);
+      }
+    }
+  }
 }
 
 function renderDetailList() {
@@ -1189,7 +1212,8 @@ function wireTimeline() {
   const root = document.getElementById('timeline');
   root.addEventListener('mousedown', e => {
     if (isMobile()) return;
-    if (e.target.closest('[data-add-avail]')) return; // let click handler handle it
+    if (e.target.closest('[data-add-avail]')) return;
+    if (e.target.closest('[data-duplicate]')) return;
     const handle = e.target.closest('.shift-handle');
     const shiftEl = e.target.closest('.shift');
     const track = e.target.closest('.day-track');
@@ -1227,8 +1251,11 @@ function wireTimeline() {
         drag = { mode, weekIdx, dayIdx: di, shiftIdx: si,
           startX: e.clientX, originalShift: { ...shift }, trackRect: rect };
       } else {
+        // Only allow cross-day drag for normal (non-split, non-continuation) shifts
+        const canCrossDay = !isSplitStart && !isContinuation && !isCrossWeekCont;
         drag = { mode: 'move', weekIdx, dayIdx: di, shiftIdx: si,
-          startX: e.clientX, originalShift: { ...shift }, trackRect: rect };
+          startX: e.clientX, originalShift: { ...shift }, trackRect: rect,
+          targetDi: canCrossDay ? di : undefined };
       }
       shiftEl.classList.add('dragging');
       e.preventDefault();
@@ -1255,6 +1282,18 @@ function wireTimeline() {
       const newStart = clamp(snap(originalShift.start + deltaMin), 0, TIMELINE_END - MIN_SHIFT);
       shift.start = newStart;
       shift.end = newStart + length;
+
+      // Cross-day tracking: find which row the mouse is over
+      if (drag.targetDi !== undefined) {
+        const allTracks = document.querySelectorAll('.day-track');
+        for (const t of allTracks) {
+          const r = t.getBoundingClientRect();
+          if (e.clientY >= r.top && e.clientY <= r.bottom) {
+            drag.targetDi = parseInt(t.dataset.day);
+            break;
+          }
+        }
+      }
     } else if (mode === 'resize-start') {
       shift.start = clamp(snap(originalShift.start + deltaMin), 0, shift.end - MIN_SHIFT);
     } else if (mode === 'resize-end') {
@@ -1284,6 +1323,13 @@ function wireTimeline() {
       shift.end = snap(shift.end);
       if (shift.end - shift.start < MIN_SHIFT) {
         weeks[drag.weekIdx][drag.dayIdx].splice(drag.shiftIdx, 1);
+      } else if (drag.targetDi !== undefined && drag.targetDi !== drag.dayIdx) {
+        // Cross-day move: remove from source, add to target
+        weeks[drag.weekIdx][drag.dayIdx].splice(drag.shiftIdx, 1);
+        const moved = { ...shift, availability: JSON.parse(JSON.stringify(shift.availability || [])) };
+        // Clamp end to same-day if it would cross midnight on the target
+        if (moved.end > TIMELINE_END && drag.targetDi < 6) moved.end = TIMELINE_END;
+        weeks[drag.weekIdx][drag.targetDi].push(moved);
       } else {
         cleanupShiftAvailability(shift);
       }
@@ -1292,6 +1338,42 @@ function wireTimeline() {
     drag = { mode: null };
     scheduleSave();
     renderAll();
+  });
+
+  // Duplicate button click
+  root.addEventListener('click', e => {
+    const dupBtn = e.target.closest('[data-duplicate]');
+    if (dupBtn) {
+      const shiftEl = dupBtn.closest('.shift');
+      if (!shiftEl) return;
+      const di = parseInt(shiftEl.dataset.day);
+      const si = parseInt(shiftEl.dataset.idx);
+      const shift = weeks[activeWeek] && weeks[activeWeek][di] && weeks[activeWeek][di][si];
+      if (!shift) return;
+      e.stopPropagation(); e.preventDefault();
+      const copy = { start: shift.start, end: shift.end, availability: JSON.parse(JSON.stringify(shift.availability || [])) };
+      // Clamp cross-midnight end when duplicating to a non-Sunday row
+      const nextDi = di + 1;
+      if (nextDi < 7) {
+        if (copy.end > TIMELINE_END) copy.end = TIMELINE_END;
+        weeks[activeWeek][nextDi].push(copy);
+      } else {
+        // Sunday → next week Monday
+        if (activeWeek + 1 >= weeks.length) {
+          const lastMeta = weekMeta[activeWeek];
+          const nextMeta = isRotasjon()
+            ? { num: lastMeta.num + 1, year: null }
+            : addWeeksToIso(lastMeta.num, lastMeta.year, 1);
+          weekMeta.push(nextMeta);
+          weeks.push(emptyWeek());
+        }
+        if (copy.end > TIMELINE_END) copy.end = TIMELINE_END;
+        weeks[activeWeek + 1][0].push(copy);
+      }
+      scheduleSave();
+      renderAll();
+      return;
+    }
   });
 
   // Plus-button click (availability): handle both desktop and mobile

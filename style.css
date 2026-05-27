@@ -434,6 +434,49 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; colo
   );
 }
 
+/* Duplicate-to-next-day button */
+.shift-duplicate {
+  position: absolute;
+  top: 2px;
+  right: 20px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: rgba(255, 255, 255, 0.7);
+  color: inherit;
+  border-radius: 50%;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3;
+}
+.shift:hover .shift-duplicate { opacity: 0.95; }
+.shift-duplicate:hover { background: #fff; opacity: 1; }
+
+/* Cross-day drag states */
+.shift.drag-source { opacity: 0.3; pointer-events: none; }
+.shift.shift-ghost {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  border-radius: 6px;
+  background: rgba(99, 102, 241, 0.25);
+  border: 2px dashed rgba(99, 102, 241, 0.6);
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  color: rgba(99, 102, 241, 0.8);
+  pointer-events: none;
+}
+
 /* Plus button to add availability time (visible on hover, lastebil only) */
 .shift-add-avail {
   position: absolute;
