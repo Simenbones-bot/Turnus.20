@@ -434,14 +434,11 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; colo
   );
 }
 
-/* Duplicate button + dropdown */
-.shift-dup-wrap {
+/* Duplicate button (portal menu rendered on body) */
+.shift-duplicate {
   position: absolute;
   top: 2px;
   right: 20px;
-  z-index: 10;
-}
-.shift-duplicate {
   width: 16px;
   height: 16px;
   padding: 0;
@@ -457,25 +454,23 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; colo
   display: flex;
   align-items: center;
   justify-content: center;
+  z-index: 3;
 }
 .shift:hover .shift-duplicate { opacity: 0.95; }
 .shift-duplicate:hover { background: #fff; opacity: 1; }
 .shift-dup-menu {
-  position: absolute;
-  top: 20px;
-  right: 0;
   background: #fff;
   border: 1px solid #e2e8f0;
   border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.12);
-  min-width: 170px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.13);
+  min-width: 180px;
   overflow: hidden;
-  z-index: 100;
+  z-index: 9999;
 }
 .shift-dup-menu button {
   display: block;
   width: 100%;
-  padding: 8px 14px;
+  padding: 9px 14px;
   text-align: left;
   font-size: 13px;
   font-family: 'IBM Plex Sans', sans-serif;

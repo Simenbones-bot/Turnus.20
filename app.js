@@ -669,13 +669,75 @@ function renderDateRange() {
 
 // Build availability stripe spans for the portion of a shift in [portionStart..portionEnd]
 function addDuplicateButtonHtml() {
-  return `<div class="shift-dup-wrap">
-    <button type="button" class="shift-duplicate" data-duplicate aria-label="Kopieringsalternativer" title="Kopier vakt">↓</button>
-    <div class="shift-dup-menu" hidden>
-      <button type="button" data-dup-action="next">Kopier vakt</button>
-      <button type="button" data-dup-action="weekdays">Kopier alle hverdager</button>
-    </div>
-  </div>`;
+  return `<button type="button" class="shift-duplicate" data-duplicate aria-label="Kopieringsalternativer" title="Kopier vakt">↓</button>`;
+}
+
+// Floating duplicate menu (portal — rendered on body to escape overflow:hidden)
+let dupMenuEl = null;
+let dupMenuContext = null; // { weekIdx, di, si }
+
+function ensureDupMenu() {
+  if (dupMenuEl) return;
+  dupMenuEl = document.createElement('div');
+  dupMenuEl.className = 'shift-dup-menu';
+  dupMenuEl.hidden = true;
+  dupMenuEl.innerHTML = `
+    <button type="button" data-dup-action="next">Kopier vakt</button>
+    <button type="button" data-dup-action="weekdays">Kopier alle hverdager</button>`;
+  dupMenuEl.addEventListener('click', e => {
+    const action = e.target.closest('[data-dup-action]');
+    if (!action || !dupMenuContext) return;
+    e.stopPropagation();
+    const { weekIdx, di, si } = dupMenuContext;
+    const shift = weeks[weekIdx] && weeks[weekIdx][di] && weeks[weekIdx][di][si];
+    if (!shift) { closeDupMenu(); return; }
+    const makeClampedCopy = () => ({
+      start: shift.start,
+      end: shift.end > TIMELINE_END ? TIMELINE_END : shift.end,
+      availability: JSON.parse(JSON.stringify(shift.availability || [])),
+    });
+    if (action.dataset.dupAction === 'next') {
+      const nextDi = di + 1;
+      if (nextDi < 7) {
+        weeks[weekIdx][nextDi].push(makeClampedCopy());
+      } else {
+        if (weekIdx + 1 >= weeks.length) {
+          const lastMeta = weekMeta[weekIdx];
+          const nextMeta = isRotasjon()
+            ? { num: lastMeta.num + 1, year: null }
+            : addWeeksToIso(lastMeta.num, lastMeta.year, 1);
+          weekMeta.push(nextMeta);
+          weeks.push(emptyWeek());
+        }
+        weeks[weekIdx + 1][0].push(makeClampedCopy());
+      }
+    } else if (action.dataset.dupAction === 'weekdays') {
+      for (let d = 0; d < 5; d++) {
+        if (d === di) continue;
+        weeks[weekIdx][d].push(makeClampedCopy());
+      }
+    }
+    closeDupMenu();
+    scheduleSave();
+    renderAll();
+  });
+  document.body.appendChild(dupMenuEl);
+}
+
+function openDupMenu(btn, weekIdx, di, si) {
+  ensureDupMenu();
+  dupMenuContext = { weekIdx, di, si };
+  dupMenuEl.hidden = false;
+  const r = btn.getBoundingClientRect();
+  dupMenuEl.style.position = 'fixed';
+  dupMenuEl.style.top = (r.bottom + 4) + 'px';
+  dupMenuEl.style.left = r.left + 'px';
+  dupMenuEl.style.right = 'auto';
+}
+
+function closeDupMenu() {
+  if (dupMenuEl) dupMenuEl.hidden = true;
+  dupMenuContext = null;
 }
 
 function availabilityStripesHtml(s, portionStart, portionEnd) {
@@ -1344,68 +1406,24 @@ function wireTimeline() {
 
   // Duplicate button click
   root.addEventListener('click', e => {
-    // Toggle dropdown on ↓ button
+    // Toggle floating duplicate menu
     const dupBtn = e.target.closest('[data-duplicate]');
     if (dupBtn) {
       e.stopPropagation(); e.preventDefault();
-      const menu = dupBtn.closest('.shift-dup-wrap').querySelector('.shift-dup-menu');
-      // Close all other open menus first
-      document.querySelectorAll('.shift-dup-menu:not([hidden])').forEach(m => { if (m !== menu) m.hidden = true; });
-      menu.hidden = !menu.hidden;
-      return;
-    }
-
-    // Handle dropdown actions
-    const dupAction = e.target.closest('[data-dup-action]');
-    if (dupAction) {
-      e.stopPropagation(); e.preventDefault();
-      const action = dupAction.dataset.dupAction;
-      const shiftEl = dupAction.closest('.shift');
+      const shiftEl = dupBtn.closest('.shift');
       if (!shiftEl) return;
       const di = parseInt(shiftEl.dataset.day);
       const si = parseInt(shiftEl.dataset.idx);
-      const shift = weeks[activeWeek] && weeks[activeWeek][di] && weeks[activeWeek][di][si];
-      if (!shift) return;
-
-      const makeClampedCopy = () => {
-        const c = { start: shift.start, end: shift.end, availability: JSON.parse(JSON.stringify(shift.availability || [])) };
-        if (c.end > TIMELINE_END) c.end = TIMELINE_END;
-        return c;
-      };
-
-      if (action === 'next') {
-        // Copy to next day (or next week Monday if Sunday)
-        const nextDi = di + 1;
-        if (nextDi < 7) {
-          weeks[activeWeek][nextDi].push(makeClampedCopy());
-        } else {
-          if (activeWeek + 1 >= weeks.length) {
-            const lastMeta = weekMeta[activeWeek];
-            const nextMeta = isRotasjon()
-              ? { num: lastMeta.num + 1, year: null }
-              : addWeeksToIso(lastMeta.num, lastMeta.year, 1);
-            weekMeta.push(nextMeta);
-            weeks.push(emptyWeek());
-          }
-          weeks[activeWeek + 1][0].push(makeClampedCopy());
-        }
-      } else if (action === 'weekdays') {
-        // Copy to all weekdays (Mon–Fri, di 0–4) except the source day
-        for (let d = 0; d < 5; d++) {
-          if (d === di) continue;
-          weeks[activeWeek][d].push(makeClampedCopy());
-        }
+      if (dupMenuEl && !dupMenuEl.hidden && dupMenuContext && dupMenuContext.di === di && dupMenuContext.si === si) {
+        closeDupMenu();
+      } else {
+        openDupMenu(dupBtn, activeWeek, di, si);
       }
-
-      // Close menu, save and re-render
-      dupAction.closest('.shift-dup-menu').hidden = true;
-      scheduleSave();
-      renderAll();
       return;
     }
 
-    // Close any open dup menus when clicking elsewhere
-    document.querySelectorAll('.shift-dup-menu:not([hidden])').forEach(m => { m.hidden = true; });
+    // Close dup menu when clicking elsewhere in the timeline
+    closeDupMenu();
   });
 
   // Plus-button click (availability): handle both desktop and mobile
@@ -1996,8 +2014,10 @@ function hardReset() {
 
 // ====== PDF action wiring ======
 function wireGlobalClose() {
-  document.addEventListener('click', () => {
-    document.querySelectorAll('.shift-dup-menu:not([hidden])').forEach(m => { m.hidden = true; });
+  document.addEventListener('click', e => {
+    if (!e.target.closest('[data-duplicate]') && !e.target.closest('.shift-dup-menu')) {
+      closeDupMenu();
+    }
   });
 }
 
