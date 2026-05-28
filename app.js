@@ -472,11 +472,7 @@ function initDefaults() {
   const first = addWeeksToIso(today.num, today.year, 2);
   weekMeta = [{ num: first.num, year: first.year }];
   weeks = [emptyWeek()];
-  weeks[0][0] = [{ start: 7 * 60, end: 15 * 60 + 30, availability: [] }];
-  weeks[0][1] = [{ start: 7 * 60, end: 15 * 60 + 30, availability: [] }];
-  weeks[0][2] = [{ start: 7 * 60, end: 15 * 60 + 30, availability: [] }];
-  weeks[0][3] = [{ start: 7 * 60, end: 15 * 60 + 30, availability: [] }];
-  weeks[0][4] = [{ start: 7 * 60, end: 15 * 60, availability: [] }];
+  weeks[0][0] = [{ start: 7 * 60, end: 15 * 60, availability: [] }];
   activeWeek = 0;
   formData.avdeling = 'Bergen Distribusjon';
   formData.avdelingsleder = 'Ingrid Solheim';
@@ -673,7 +669,13 @@ function renderDateRange() {
 
 // Build availability stripe spans for the portion of a shift in [portionStart..portionEnd]
 function addDuplicateButtonHtml() {
-  return `<button type="button" class="shift-duplicate" data-duplicate aria-label="Dupliser vakt til neste dag" title="Dupliser til neste dag">↓</button>`;
+  return `<div class="shift-dup-wrap">
+    <button type="button" class="shift-duplicate" data-duplicate aria-label="Kopieringsalternativer" title="Kopier vakt">↓</button>
+    <div class="shift-dup-menu" hidden>
+      <button type="button" data-dup-action="next">Kopier vakt</button>
+      <button type="button" data-dup-action="weekdays">Kopier alle hverdager</button>
+    </div>
+  </div>`;
 }
 
 function availabilityStripesHtml(s, portionStart, portionEnd) {
@@ -1342,38 +1344,68 @@ function wireTimeline() {
 
   // Duplicate button click
   root.addEventListener('click', e => {
+    // Toggle dropdown on ↓ button
     const dupBtn = e.target.closest('[data-duplicate]');
     if (dupBtn) {
-      const shiftEl = dupBtn.closest('.shift');
+      e.stopPropagation(); e.preventDefault();
+      const menu = dupBtn.closest('.shift-dup-wrap').querySelector('.shift-dup-menu');
+      // Close all other open menus first
+      document.querySelectorAll('.shift-dup-menu:not([hidden])').forEach(m => { if (m !== menu) m.hidden = true; });
+      menu.hidden = !menu.hidden;
+      return;
+    }
+
+    // Handle dropdown actions
+    const dupAction = e.target.closest('[data-dup-action]');
+    if (dupAction) {
+      e.stopPropagation(); e.preventDefault();
+      const action = dupAction.dataset.dupAction;
+      const shiftEl = dupAction.closest('.shift');
       if (!shiftEl) return;
       const di = parseInt(shiftEl.dataset.day);
       const si = parseInt(shiftEl.dataset.idx);
       const shift = weeks[activeWeek] && weeks[activeWeek][di] && weeks[activeWeek][di][si];
       if (!shift) return;
-      e.stopPropagation(); e.preventDefault();
-      const copy = { start: shift.start, end: shift.end, availability: JSON.parse(JSON.stringify(shift.availability || [])) };
-      // Clamp cross-midnight end when duplicating to a non-Sunday row
-      const nextDi = di + 1;
-      if (nextDi < 7) {
-        if (copy.end > TIMELINE_END) copy.end = TIMELINE_END;
-        weeks[activeWeek][nextDi].push(copy);
-      } else {
-        // Sunday → next week Monday
-        if (activeWeek + 1 >= weeks.length) {
-          const lastMeta = weekMeta[activeWeek];
-          const nextMeta = isRotasjon()
-            ? { num: lastMeta.num + 1, year: null }
-            : addWeeksToIso(lastMeta.num, lastMeta.year, 1);
-          weekMeta.push(nextMeta);
-          weeks.push(emptyWeek());
+
+      const makeClampedCopy = () => {
+        const c = { start: shift.start, end: shift.end, availability: JSON.parse(JSON.stringify(shift.availability || [])) };
+        if (c.end > TIMELINE_END) c.end = TIMELINE_END;
+        return c;
+      };
+
+      if (action === 'next') {
+        // Copy to next day (or next week Monday if Sunday)
+        const nextDi = di + 1;
+        if (nextDi < 7) {
+          weeks[activeWeek][nextDi].push(makeClampedCopy());
+        } else {
+          if (activeWeek + 1 >= weeks.length) {
+            const lastMeta = weekMeta[activeWeek];
+            const nextMeta = isRotasjon()
+              ? { num: lastMeta.num + 1, year: null }
+              : addWeeksToIso(lastMeta.num, lastMeta.year, 1);
+            weekMeta.push(nextMeta);
+            weeks.push(emptyWeek());
+          }
+          weeks[activeWeek + 1][0].push(makeClampedCopy());
         }
-        if (copy.end > TIMELINE_END) copy.end = TIMELINE_END;
-        weeks[activeWeek + 1][0].push(copy);
+      } else if (action === 'weekdays') {
+        // Copy to all weekdays (Mon–Fri, di 0–4) except the source day
+        for (let d = 0; d < 5; d++) {
+          if (d === di) continue;
+          weeks[activeWeek][d].push(makeClampedCopy());
+        }
       }
+
+      // Close menu, save and re-render
+      dupAction.closest('.shift-dup-menu').hidden = true;
       scheduleSave();
       renderAll();
       return;
     }
+
+    // Close any open dup menus when clicking elsewhere
+    document.querySelectorAll('.shift-dup-menu:not([hidden])').forEach(m => { m.hidden = true; });
   });
 
   // Plus-button click (availability): handle both desktop and mobile
@@ -1963,6 +1995,12 @@ function hardReset() {
 }
 
 // ====== PDF action wiring ======
+function wireGlobalClose() {
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.shift-dup-menu:not([hidden])').forEach(m => { m.hidden = true; });
+  });
+}
+
 function wireActions() {
   document.getElementById('btn-pdf').addEventListener('click', () => {
     const tryPdf = () => generatePDF();
@@ -2057,6 +2095,7 @@ function init() {
   wireForm();
   wireTimeline();
   wireActions();
+  wireGlobalClose();
   renderAll();
 }
 document.addEventListener('DOMContentLoaded', init);

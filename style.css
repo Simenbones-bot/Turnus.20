@@ -434,11 +434,14 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; colo
   );
 }
 
-/* Duplicate-to-next-day button */
-.shift-duplicate {
+/* Duplicate button + dropdown */
+.shift-dup-wrap {
   position: absolute;
   top: 2px;
   right: 20px;
+  z-index: 10;
+}
+.shift-duplicate {
   width: 16px;
   height: 16px;
   padding: 0;
@@ -454,10 +457,35 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; colo
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 3;
 }
 .shift:hover .shift-duplicate { opacity: 0.95; }
 .shift-duplicate:hover { background: #fff; opacity: 1; }
+.shift-dup-menu {
+  position: absolute;
+  top: 20px;
+  right: 0;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+  min-width: 170px;
+  overflow: hidden;
+  z-index: 100;
+}
+.shift-dup-menu button {
+  display: block;
+  width: 100%;
+  padding: 8px 14px;
+  text-align: left;
+  font-size: 13px;
+  font-family: 'IBM Plex Sans', sans-serif;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #0f172a;
+  white-space: nowrap;
+}
+.shift-dup-menu button:hover { background: #f1f5f9; }
 
 /* Cross-day drag states */
 .shift.drag-source { opacity: 0.3; pointer-events: none; }
