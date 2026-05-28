@@ -270,6 +270,35 @@ function validateFATS() {
     reducedRest: {}, // `${wi}-${di}-${si}` -> { n, gapMin, broken }
     reducedRestSummary: { total: 0, currentCount: 0, breached: 0 },
   };
+
+  // Overlap check — always runs, regardless of lastebil
+  weeks.forEach((week, wi) => {
+    week.forEach((day, di) => {
+      // Sort indices by start time so we only need consecutive checks
+      const sorted = day.map((s, si) => ({ s, si })).sort((a, b) => a.s.start - b.s.start);
+      const flagged = new Set();
+      for (let i = 0; i < sorted.length; i++) {
+        for (let j = i + 1; j < sorted.length; j++) {
+          const a = sorted[i].s, b = sorted[j].s;
+          if (a.start < b.end && b.start < a.end) {
+            const keyA = `${wi}-${di}-${sorted[i].si}`;
+            const keyB = `${wi}-${di}-${sorted[j].si}`;
+            result.shiftFlags[keyA] = 'broken';
+            result.shiftFlags[keyB] = 'broken';
+            if (!flagged.has(di)) {
+              flagged.add(di);
+              result.broken.push({
+                week: wi, dayIdx: di,
+                rule: 'overlap',
+                text: `Vakter på ${DAY_SHORT[di]} (uke ${weekMeta[wi].num}) overlapper hverandre`,
+              });
+            }
+          }
+        }
+      }
+    });
+  });
+
   if (!lastebil) { fatsResult = result; return; }
 
   weeks.forEach((week, wi) => {
@@ -1150,7 +1179,7 @@ function renderFatsPanel() {
   const counter = document.getElementById('fats-count');
   const summary = fatsResult.reducedRestSummary || { total: 0, currentCount: 0, breached: 0 };
   const showSummary = lastebil && summary.total > 0;
-  if (!lastebil || (fatsResult.broken.length === 0 && fatsResult.warnings.length === 0 && !showSummary)) {
+  if (fatsResult.broken.length === 0 && fatsResult.warnings.length === 0 && !showSummary) {
     panel.hidden = true;
     return;
   }
@@ -1171,6 +1200,7 @@ function renderFatsPanel() {
   }
 
   const ruleTitle = {
+    'overlap': 'Overlappende vakter',
     'shift-10h': 'Vakt over 10 timer',
     'week-60h': 'Over 60 timer i uka',
     'rest-9h': 'Hviletid under 9 timer',
