@@ -1093,17 +1093,23 @@ function showEmailModal(filename) {
 // dag/kveld annenhver uke, hver 3. lørdag i en 4-ukers turnus, dagvakten kortes ned for å treffe 100%.
 let suggestParams = {
   numWeeks: 4,
+  mode: 'target',        // target = juster til mål % · fulltid = prøv fulltid, ellers høyest · none = bruk tidene som oppgitt
   target: 100,
   startNum: null,        // settes fra gjeldende uke ved åpning
   startYear: null,
+  days: [true, true, true, true, true], // man–fre som jobbes
   dayStart: 7 * 60 + 30,
   dayEnd: 14 * 60 + 30,
   eveStart: 15 * 60,
   eveEnd: 22 * 60 + 30,
-  rotation: 'veksel',    // veksel | dag | kveld
+  rotation: 'veksel',    // veksel = dag/kveld annenhver uke · samme = samme hverdagsvakt hver uke
   satEvery: 3,           // 0 = aldri, ellers hver N. lørdag
-  satShift: 'dag',       // dag | kveld
-  adjustShift: 'dag',    // hvilket ukedagsskift som justeres for å treffe målet
+  satStart: 7 * 60 + 30,
+  satEnd: 14 * 60 + 30,
+  sunEvery: 0,           // 0 = aldri, ellers hver N. søndag
+  sunStart: 7 * 60 + 30,
+  sunEnd: 14 * 60 + 30,
+  adjustShift: 'dag',    // hvilket ukedagsskift som justeres for å treffe målet (dag/kveld)
   adjustEnd: 'slutt',    // slutt | start – hvilken ende som flyttes
 };
 
@@ -1124,52 +1130,61 @@ function generateTurnusSuggestion(p) {
 
   const dayShift = () => ({ start: p.dayStart, end: p.dayEnd });
   const eveShift = () => ({ start: p.eveStart, end: p.eveEnd });
-  const adjustable = []; // referanser til ukedagsskift som skal justeres mot målet
+  const days = p.days || [true, true, true, true, true];
+  const adjustable = []; // referanser til ukedagsskift som justeres mot målet
 
+  // Ukedager (man–fre): enten samme hverdagsvakt hver uke, eller dag/kveld annenhver uke
   for (let i = 0; i < N; i++) {
-    let type;
-    if (p.rotation === 'dag') type = 'dag';
-    else if (p.rotation === 'kveld') type = 'kveld';
-    else type = (i % 2 === 0) ? 'dag' : 'kveld'; // annenhver uke
+    const type = p.rotation === 'veksel' ? ((i % 2 === 0) ? 'dag' : 'kveld') : 'dag';
     for (let d = 0; d < 5; d++) {
+      if (!days[d]) continue;
       const s = type === 'dag' ? dayShift() : eveShift();
       wk[i][d] = [s];
       if (type === p.adjustShift) adjustable.push(s);
     }
   }
 
-  // Lørdager (dagIdx 5): jobb hver N. lørdag, første gang i uke N
-  if (p.satEvery > 0) {
-    for (let i = 0; i < N; i++) {
-      if (i % p.satEvery === (p.satEvery - 1)) {
-        wk[i][5] = [p.satShift === 'kveld' ? eveShift() : dayShift()];
+  // Lørdag (dagIdx 5) og søndag (dagIdx 6) med egne tider, hver N. uke
+  const placeWeekend = (dayIdx, every, start, end) => {
+    if (every > 0) {
+      for (let i = 0; i < N; i++) {
+        if (i % every === (every - 1)) wk[i][dayIdx] = [{ start, end }];
       }
     }
-  }
+  };
+  placeWeekend(5, p.satEvery, p.satStart, p.satEnd);
+  placeWeekend(6, p.sunEvery, p.sunStart, p.sunEnd);
 
-  // Juster lengden på de valgte ukedagsskiftene til vi treffer stillingsprosenten
   const sumNet = w => w.reduce((s, day) => s + day.reduce((a, sh) => a + shiftNet(sh), 0), 0);
-  const targetTotal = (p.target / 100) * 37.5 * 60 * N; // netto minutter for hele turnusen
+  const totalNet = () => wk.reduce((s, w) => s + sumNet(w), 0);
+  const naturalTotal = totalNet();
+  const naturalPct = (naturalTotal / N / 60) / 37.5 * 100;
+
+  // Justeringsmodus:
+  //  - target:  juster valgt ukedagsskift opp/ned til mål %
+  //  - fulltid: prøv 100 %, men forleng aldri (bruk kundens tider) – kort bare ned hvis over
+  //  - none:    ikke juster
+  const mode = p.mode || 'target';
   let adjusted = false;
-  if (adjustable.length) {
-    const current = wk.reduce((s, w) => s + sumNet(w), 0);
-    let per = (targetTotal - current) / adjustable.length; // netto minutter per skift
-    per = Math.round(per / SNAP) * SNAP;                    // rund til 15 min
+  let fullReached = false;
+  if (mode !== 'none' && adjustable.length) {
+    const targetPct = mode === 'fulltid' ? 100 : p.target;
+    const targetTotal = (targetPct / 100) * 37.5 * 60 * N;
+    let per = Math.round((targetTotal - naturalTotal) / adjustable.length / SNAP) * SNAP;
+    if (mode === 'fulltid' && per > 0) per = 0; // fulltid forlenger ikke kundens tider
     if (per !== 0) {
       adjusted = true;
       adjustable.forEach(s => {
-        if (p.adjustEnd === 'start') {
-          s.start = clamp(s.start - per, 0, s.end - MIN_SHIFT);
-        } else {
-          s.end = clamp(s.end + per, s.start + MIN_SHIFT, TIMELINE_END);
-        }
+        if (p.adjustEnd === 'start') s.start = clamp(s.start - per, 0, s.end - MIN_SHIFT);
+        else s.end = clamp(s.end + per, s.start + MIN_SHIFT, TIMELINE_END);
       });
     }
   }
 
-  const finalTotal = wk.reduce((s, w) => s + sumNet(w), 0);
+  const finalTotal = totalNet();
   const pct = (finalTotal / N / 60) / 37.5 * 100;
-  return { weeks: wk, weekMeta: meta, pct, adjusted, example: adjustable[0] || null };
+  if (mode === 'fulltid') fullReached = pct >= 99;
+  return { weeks: wk, weekMeta: meta, pct, naturalPct, adjusted, fullReached, mode, example: adjustable[0] || null };
 }
 
 function openSuggestModal() {
@@ -1228,49 +1243,81 @@ function openSuggestModal() {
     return sel;
   };
 
+  // Avkrysningsrad for ukedager (man–fre)
+  const dayBoxes = [];
+  const daysControl = document.createElement('div');
+  daysControl.className = 'suggest-days';
+  ['Man', 'Tir', 'Ons', 'Tor', 'Fre'].forEach((name, d) => {
+    const lab = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = suggestParams.days[d] !== false;
+    dayBoxes.push(cb);
+    const sp = document.createElement('span');
+    sp.textContent = name;
+    lab.appendChild(cb); lab.appendChild(sp);
+    daysControl.appendChild(lab);
+  });
+
   // Kontroller
   const cWeeks = numInput(suggestParams.numWeeks, 1, 26);
+  const cMode = select([
+    ['target', 'Juster til mål %'],
+    ['fulltid', 'Prøv fulltid, ellers høyest deltid'],
+    ['none', 'Bruk tidene som oppgitt'],
+  ], suggestParams.mode);
   const cTarget = numInput(suggestParams.target, 1, 150);
   const cStartNum = numInput(suggestParams.startNum, 1, 53);
   const cStartYear = numInput(suggestParams.startYear, 2000, 2100);
   const cRotation = select([
+    ['samme', 'Samme hverdagsvakt hver uke'],
     ['veksel', 'Dag og kveld annenhver uke'],
-    ['dag', 'Bare dagvakter'],
-    ['kveld', 'Bare kveldsvakter'],
   ], suggestParams.rotation);
   const cDayStart = timeSelect(suggestParams.dayStart, false);
   const cDayEnd = timeSelect(suggestParams.dayEnd, true);
   const cEveStart = timeSelect(suggestParams.eveStart, false);
   const cEveEnd = timeSelect(suggestParams.eveEnd, true);
-  const cSatEvery = select([
-    ['0', 'Aldri'],
-    ['1', 'Hver uke'],
-    ['2', 'Hver 2. lørdag'],
-    ['3', 'Hver 3. lørdag'],
-    ['4', 'Hver 4. lørdag'],
-  ], suggestParams.satEvery);
-  const cSatShift = select([['dag', 'Dagvakt'], ['kveld', 'Kveldsvakt']], suggestParams.satShift);
+  const everyOpts = label => [
+    ['0', 'Aldri'], ['1', 'Hver uke'],
+    ['2', `Hver 2. ${label}`], ['3', `Hver 3. ${label}`], ['4', `Hver 4. ${label}`],
+  ];
+  const cSatEvery = select(everyOpts('lørdag'), suggestParams.satEvery);
+  const cSatStart = timeSelect(suggestParams.satStart, false);
+  const cSatEnd = timeSelect(suggestParams.satEnd, true);
+  const cSunEvery = select(everyOpts('søndag'), suggestParams.sunEvery);
+  const cSunStart = timeSelect(suggestParams.sunStart, false);
+  const cSunEnd = timeSelect(suggestParams.sunEnd, true);
   const cAdjustShift = select([['dag', 'Dagvakten'], ['kveld', 'Kveldsvakten']], suggestParams.adjustShift);
   const cAdjustEnd = select([['slutt', 'Sluttiden'], ['start', 'Starttiden']], suggestParams.adjustEnd);
 
   grid.appendChild(subhead('Turnus'));
   grid.appendChild(field('Antall uker', cWeeks));
+  grid.appendChild(field('Stillingsmål', cMode));
   grid.appendChild(field('Mål stillingsprosent (%)', cTarget));
   grid.appendChild(field('Startuke', cStartNum));
   grid.appendChild(field('År', cStartYear));
-  grid.appendChild(field('Ukerotasjon (man–fre)', cRotation, true));
 
-  grid.appendChild(subhead('Dagvakt'));
+  grid.appendChild(subhead('Ukedager (man–fre)'));
+  grid.appendChild(field('Dager som jobbes', daysControl, true));
+  grid.appendChild(field('Rotasjon', cRotation, true));
+
+  grid.appendChild(subhead('Hverdagsvakt (dag)'));
   grid.appendChild(field('Fra ca', cDayStart));
   grid.appendChild(field('Til ca', cDayEnd));
 
-  grid.appendChild(subhead('Kveldsvakt'));
+  grid.appendChild(subhead('Kveldsvakt (ved annenhver uke)'));
   grid.appendChild(field('Fra ca', cEveStart));
   grid.appendChild(field('Til ca', cEveEnd));
 
   grid.appendChild(subhead('Lørdag'));
-  grid.appendChild(field('Hyppighet', cSatEvery));
-  grid.appendChild(field('Lørdagsvakt type', cSatShift));
+  grid.appendChild(field('Hyppighet', cSatEvery, true));
+  grid.appendChild(field('Fra', cSatStart));
+  grid.appendChild(field('Til', cSatEnd));
+
+  grid.appendChild(subhead('Søndag'));
+  grid.appendChild(field('Hyppighet', cSunEvery, true));
+  grid.appendChild(field('Fra', cSunStart));
+  grid.appendChild(field('Til', cSunEnd));
 
   grid.appendChild(subhead('Treffe stillingsprosent'));
   grid.appendChild(field('Juster lengden på', cAdjustShift));
@@ -1278,32 +1325,50 @@ function openSuggestModal() {
 
   const readParams = () => ({
     numWeeks: parseInt(cWeeks.value) || 1,
+    mode: cMode.value,
     target: parseFloat(cTarget.value) || 100,
     startNum: parseInt(cStartNum.value) || 1,
     startYear: parseInt(cStartYear.value) || new Date().getFullYear(),
+    days: dayBoxes.map(cb => cb.checked),
     dayStart: parseInt(cDayStart.value),
     dayEnd: parseInt(cDayEnd.value),
     eveStart: parseInt(cEveStart.value),
     eveEnd: parseInt(cEveEnd.value),
     rotation: cRotation.value,
     satEvery: parseInt(cSatEvery.value),
-    satShift: cSatShift.value,
+    satStart: parseInt(cSatStart.value),
+    satEnd: parseInt(cSatEnd.value),
+    sunEvery: parseInt(cSunEvery.value),
+    sunStart: parseInt(cSunStart.value),
+    sunEnd: parseInt(cSunEnd.value),
     adjustShift: cAdjustShift.value,
     adjustEnd: cAdjustEnd.value,
   });
 
+  const fmtPct = v => v.toFixed(1).replace('.', ',') + '%';
   const preview = document.getElementById('suggest-preview');
   const updatePreview = () => {
     suggestParams = readParams();
-    const res = generateTurnusSuggestion(suggestParams);
-    const diff = Math.abs(res.pct - suggestParams.target);
-    const cls = diff <= 1.5 ? 'ok' : 'warn';
-    let html = `Forslaget gir <strong class="${cls}">${res.pct.toFixed(1).replace('.', ',')}%</strong> ` +
-               `(mål ${suggestParams.target}%) over ${suggestParams.numWeeks} uker.`;
+    const p = suggestParams;
+    const res = generateTurnusSuggestion(p);
+    let html;
+    if (p.mode === 'fulltid') {
+      if (res.fullReached) {
+        html = `<span class="ok">✓ Fulltid mulig:</span> forslaget gir <strong class="ok">${fmtPct(res.pct)}</strong> stilling.`;
+      } else {
+        html = `Fulltid er <span class="warn">ikke mulig</span> med de oppgitte tidene. ` +
+               `Høyeste stilling blir <strong class="warn">${fmtPct(res.pct)}</strong> (deltid).`;
+      }
+    } else if (p.mode === 'none') {
+      html = `Forslaget gir <strong>${fmtPct(res.pct)}</strong> stilling – tidene brukes som oppgitt.`;
+    } else {
+      const diff = Math.abs(res.pct - p.target);
+      const cls = diff <= 1.5 ? 'ok' : 'warn';
+      html = `Forslaget gir <strong class="${cls}">${fmtPct(res.pct)}</strong> (mål ${p.target}%) over ${p.numWeeks} uker.`;
+    }
     if (res.adjusted && res.example) {
-      const label = suggestParams.adjustShift === 'dag' ? 'Dagvakten' : 'Kveldsvakten';
-      html += `<br>${label} er justert til <strong>${minutesToHHMM(res.example.start)}–${minutesToHHMM(res.example.end)}</strong> ` +
-              `for å treffe målet.`;
+      const label = p.adjustShift === 'dag' ? 'Dagvakten' : 'Kveldsvakten';
+      html += `<br>${label} er justert til <strong>${minutesToHHMM(res.example.start)}–${minutesToHHMM(res.example.end)}</strong>.`;
     }
     preview.innerHTML = html;
   };

@@ -759,6 +759,23 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; colo
   border-color: var(--color-primary);
   box-shadow: 0 0 0 3px rgba(26, 86, 219, 0.12);
 }
+.suggest-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.suggest-days label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+.suggest-days input { accent-color: var(--color-primary); }
 .suggest-preview {
   margin-top: 18px;
   padding: 14px 16px;
