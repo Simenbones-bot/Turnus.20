@@ -1088,6 +1088,257 @@ function showEmailModal(filename) {
   backdrop.hidden = false;
 }
 
+// ====== Foreslå turnus (forslagsgenerator) ======
+// Defaults matcher det vanlige kunde-eksempelet: dag ~07:30–14:30, kveld ~15:00–22:30,
+// dag/kveld annenhver uke, hver 3. lørdag i en 4-ukers turnus, dagvakten kortes ned for å treffe 100%.
+let suggestParams = {
+  numWeeks: 4,
+  target: 100,
+  startNum: null,        // settes fra gjeldende uke ved åpning
+  startYear: null,
+  dayStart: 7 * 60 + 30,
+  dayEnd: 14 * 60 + 30,
+  eveStart: 15 * 60,
+  eveEnd: 22 * 60 + 30,
+  rotation: 'veksel',    // veksel | dag | kveld
+  satEvery: 3,           // 0 = aldri, ellers hver N. lørdag
+  satShift: 'dag',       // dag | kveld
+  adjustShift: 'dag',    // hvilket ukedagsskift som justeres for å treffe målet
+  adjustEnd: 'slutt',    // slutt | start – hvilken ende som flyttes
+};
+
+// Bygger en komplett turnus ut fra parametrene – rene objekter, muterer ikke global state.
+function generateTurnusSuggestion(p) {
+  const N = Math.max(1, p.numWeeks | 0);
+  const wk = [];
+  for (let i = 0; i < N; i++) wk.push(emptyWeek());
+
+  // Fortløpende ISO-uker fra startuke
+  const meta = [];
+  let num = p.startNum || 1, year = p.startYear || new Date().getFullYear();
+  for (let i = 0; i < N; i++) {
+    meta.push({ num, year });
+    num++;
+    if (num > isoWeeksInYear(year)) { num = 1; year++; }
+  }
+
+  const dayShift = () => ({ start: p.dayStart, end: p.dayEnd });
+  const eveShift = () => ({ start: p.eveStart, end: p.eveEnd });
+  const adjustable = []; // referanser til ukedagsskift som skal justeres mot målet
+
+  for (let i = 0; i < N; i++) {
+    let type;
+    if (p.rotation === 'dag') type = 'dag';
+    else if (p.rotation === 'kveld') type = 'kveld';
+    else type = (i % 2 === 0) ? 'dag' : 'kveld'; // annenhver uke
+    for (let d = 0; d < 5; d++) {
+      const s = type === 'dag' ? dayShift() : eveShift();
+      wk[i][d] = [s];
+      if (type === p.adjustShift) adjustable.push(s);
+    }
+  }
+
+  // Lørdager (dagIdx 5): jobb hver N. lørdag, første gang i uke N
+  if (p.satEvery > 0) {
+    for (let i = 0; i < N; i++) {
+      if (i % p.satEvery === (p.satEvery - 1)) {
+        wk[i][5] = [p.satShift === 'kveld' ? eveShift() : dayShift()];
+      }
+    }
+  }
+
+  // Juster lengden på de valgte ukedagsskiftene til vi treffer stillingsprosenten
+  const sumNet = w => w.reduce((s, day) => s + day.reduce((a, sh) => a + shiftNet(sh), 0), 0);
+  const targetTotal = (p.target / 100) * 37.5 * 60 * N; // netto minutter for hele turnusen
+  let adjusted = false;
+  if (adjustable.length) {
+    const current = wk.reduce((s, w) => s + sumNet(w), 0);
+    let per = (targetTotal - current) / adjustable.length; // netto minutter per skift
+    per = Math.round(per / SNAP) * SNAP;                    // rund til 15 min
+    if (per !== 0) {
+      adjusted = true;
+      adjustable.forEach(s => {
+        if (p.adjustEnd === 'start') {
+          s.start = clamp(s.start - per, 0, s.end - MIN_SHIFT);
+        } else {
+          s.end = clamp(s.end + per, s.start + MIN_SHIFT, TIMELINE_END);
+        }
+      });
+    }
+  }
+
+  const finalTotal = wk.reduce((s, w) => s + sumNet(w), 0);
+  const pct = (finalTotal / N / 60) / 37.5 * 100;
+  return { weeks: wk, weekMeta: meta, pct, adjusted, example: adjustable[0] || null };
+}
+
+function openSuggestModal() {
+  const backdrop = document.getElementById('suggest-backdrop');
+  const grid = document.getElementById('suggest-grid');
+
+  // Start fra gjeldende uke hvis vi har en
+  const cur = weekMeta[activeWeek] || weekMeta[0];
+  if (cur) { suggestParams.startNum = cur.num; suggestParams.startYear = cur.year; }
+  else { const d = new Date(); suggestParams.startNum = 1; suggestParams.startYear = d.getFullYear(); }
+
+  grid.innerHTML = '';
+
+  const field = (labelText, control, full) => {
+    const l = document.createElement('label');
+    l.className = 'field' + (full ? ' field-full' : '');
+    const s = document.createElement('span');
+    s.className = 'field-label';
+    s.textContent = labelText;
+    l.appendChild(s);
+    l.appendChild(control);
+    return l;
+  };
+  const subhead = text => {
+    const h = document.createElement('div');
+    h.className = 'suggest-sub';
+    h.textContent = text;
+    return h;
+  };
+  const numInput = (value, min, max) => {
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.value = value;
+    if (min != null) inp.min = min;
+    if (max != null) inp.max = max;
+    return inp;
+  };
+  const select = (options, value) => {
+    const sel = document.createElement('select');
+    options.forEach(([v, t]) => {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = t;
+      if (String(v) === String(value)) o.selected = true;
+      sel.appendChild(o);
+    });
+    return sel;
+  };
+  const timeSelect = (value, allowNextDay) => {
+    const sel = document.createElement('select');
+    const max = allowNextDay ? TIMELINE_END : 24 * 60;
+    for (let m = 0; m <= max; m += SNAP) {
+      const o = document.createElement('option');
+      o.value = m; o.textContent = minutesToHHMM(m);
+      if (m === value) o.selected = true;
+      sel.appendChild(o);
+    }
+    return sel;
+  };
+
+  // Kontroller
+  const cWeeks = numInput(suggestParams.numWeeks, 1, 26);
+  const cTarget = numInput(suggestParams.target, 1, 150);
+  const cStartNum = numInput(suggestParams.startNum, 1, 53);
+  const cStartYear = numInput(suggestParams.startYear, 2000, 2100);
+  const cRotation = select([
+    ['veksel', 'Dag og kveld annenhver uke'],
+    ['dag', 'Bare dagvakter'],
+    ['kveld', 'Bare kveldsvakter'],
+  ], suggestParams.rotation);
+  const cDayStart = timeSelect(suggestParams.dayStart, false);
+  const cDayEnd = timeSelect(suggestParams.dayEnd, true);
+  const cEveStart = timeSelect(suggestParams.eveStart, false);
+  const cEveEnd = timeSelect(suggestParams.eveEnd, true);
+  const cSatEvery = select([
+    ['0', 'Aldri'],
+    ['1', 'Hver uke'],
+    ['2', 'Hver 2. lørdag'],
+    ['3', 'Hver 3. lørdag'],
+    ['4', 'Hver 4. lørdag'],
+  ], suggestParams.satEvery);
+  const cSatShift = select([['dag', 'Dagvakt'], ['kveld', 'Kveldsvakt']], suggestParams.satShift);
+  const cAdjustShift = select([['dag', 'Dagvakten'], ['kveld', 'Kveldsvakten']], suggestParams.adjustShift);
+  const cAdjustEnd = select([['slutt', 'Sluttiden'], ['start', 'Starttiden']], suggestParams.adjustEnd);
+
+  grid.appendChild(subhead('Turnus'));
+  grid.appendChild(field('Antall uker', cWeeks));
+  grid.appendChild(field('Mål stillingsprosent (%)', cTarget));
+  grid.appendChild(field('Startuke', cStartNum));
+  grid.appendChild(field('År', cStartYear));
+  grid.appendChild(field('Ukerotasjon (man–fre)', cRotation, true));
+
+  grid.appendChild(subhead('Dagvakt'));
+  grid.appendChild(field('Fra ca', cDayStart));
+  grid.appendChild(field('Til ca', cDayEnd));
+
+  grid.appendChild(subhead('Kveldsvakt'));
+  grid.appendChild(field('Fra ca', cEveStart));
+  grid.appendChild(field('Til ca', cEveEnd));
+
+  grid.appendChild(subhead('Lørdag'));
+  grid.appendChild(field('Hyppighet', cSatEvery));
+  grid.appendChild(field('Lørdagsvakt type', cSatShift));
+
+  grid.appendChild(subhead('Treffe stillingsprosent'));
+  grid.appendChild(field('Juster lengden på', cAdjustShift));
+  grid.appendChild(field('Flytt på', cAdjustEnd));
+
+  const readParams = () => ({
+    numWeeks: parseInt(cWeeks.value) || 1,
+    target: parseFloat(cTarget.value) || 100,
+    startNum: parseInt(cStartNum.value) || 1,
+    startYear: parseInt(cStartYear.value) || new Date().getFullYear(),
+    dayStart: parseInt(cDayStart.value),
+    dayEnd: parseInt(cDayEnd.value),
+    eveStart: parseInt(cEveStart.value),
+    eveEnd: parseInt(cEveEnd.value),
+    rotation: cRotation.value,
+    satEvery: parseInt(cSatEvery.value),
+    satShift: cSatShift.value,
+    adjustShift: cAdjustShift.value,
+    adjustEnd: cAdjustEnd.value,
+  });
+
+  const preview = document.getElementById('suggest-preview');
+  const updatePreview = () => {
+    suggestParams = readParams();
+    const res = generateTurnusSuggestion(suggestParams);
+    const diff = Math.abs(res.pct - suggestParams.target);
+    const cls = diff <= 1.5 ? 'ok' : 'warn';
+    let html = `Forslaget gir <strong class="${cls}">${res.pct.toFixed(1).replace('.', ',')}%</strong> ` +
+               `(mål ${suggestParams.target}%) over ${suggestParams.numWeeks} uker.`;
+    if (res.adjusted && res.example) {
+      const label = suggestParams.adjustShift === 'dag' ? 'Dagvakten' : 'Kveldsvakten';
+      html += `<br>${label} er justert til <strong>${minutesToHHMM(res.example.start)}–${minutesToHHMM(res.example.end)}</strong> ` +
+              `for å treffe målet.`;
+    }
+    preview.innerHTML = html;
+  };
+  grid.querySelectorAll('select, input').forEach(el => {
+    el.addEventListener('input', updatePreview);
+    el.addEventListener('change', updatePreview);
+  });
+  updatePreview();
+
+  const close = () => { backdrop.hidden = true; };
+  document.getElementById('suggest-close').onclick = close;
+  document.getElementById('suggest-cancel').onclick = close;
+  document.getElementById('suggest-generate').onclick = () => {
+    const res = generateTurnusSuggestion(readParams());
+    const commit = () => {
+      weeks = res.weeks;
+      weekMeta = res.weekMeta;
+      activeWeek = 0;
+      close();
+      scheduleSave();
+      renderAll();
+      toast(`Forslag laget · ${res.pct.toFixed(1).replace('.', ',')}% stilling`);
+    };
+    const hasExisting = weeks.some(w => w.some(d => d.length));
+    if (hasExisting) {
+      confirmDialog('Erstatte gjeldende turnus?',
+        'Forslaget erstatter alle vaktene du har lagt inn nå.', commit);
+    } else {
+      commit();
+    }
+  };
+
+  backdrop.hidden = false;
+}
+
 // ====== Restore banner ======
 function maybeShowRestoreBanner() {
   const draft = loadDraftRaw();
@@ -1119,6 +1370,7 @@ function init() {
   wireForm();
   wireTimeline();
   wireActions();
+  document.getElementById('btn-suggest').addEventListener('click', openSuggestModal);
   renderAll();
 }
 document.addEventListener('DOMContentLoaded', init);

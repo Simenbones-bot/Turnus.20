@@ -125,6 +125,7 @@
           <h2>Vakter</h2>
           <p>Klikk og dra på en dag for å lage en vakt · dra kantene for å justere</p>
         </div>
+        <button type="button" class="btn btn-outline btn-sm" id="btn-suggest">✨ Foreslå turnus</button>
         <span class="section-complete" id="shifts-complete" hidden>✓ Komplett</span>
       </header>
 
@@ -236,6 +237,26 @@
     </header>
     <div class="modal-body" id="modal-body"></div>
     <footer class="modal-foot" id="modal-foot"></footer>
+  </div>
+</div>
+
+<!-- Modal: Foreslå turnus -->
+<div class="modal-backdrop" id="suggest-backdrop" hidden>
+  <div class="modal modal-lg" role="dialog" aria-modal="true">
+    <header class="modal-head">
+      <h3>Foreslå turnus</h3>
+      <button type="button" class="modal-close" id="suggest-close" aria-label="Lukk">×</button>
+    </header>
+    <div class="modal-body">
+      <p class="suggest-intro">Fyll inn de omtrentlige ønskene til kunden, så lager vi et forslag som treffer
+        stillingsprosenten. Du kan finjustere vaktene etterpå ved å dra i tidslinjen.</p>
+      <div class="suggest-grid" id="suggest-grid"></div>
+      <div class="suggest-preview" id="suggest-preview"></div>
+    </div>
+    <footer class="modal-foot">
+      <button type="button" class="btn btn-outline" id="suggest-cancel">Avbryt</button>
+      <button type="button" class="btn btn-primary" id="suggest-generate">Lag forslag</button>
+    </footer>
   </div>
 </div>
 

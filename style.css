@@ -726,6 +726,52 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; colo
 }
 .modal-time-row label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 
+/* ===== Foreslå turnus ===== */
+.modal-lg { max-width: 560px; }
+.suggest-intro { margin: 0 0 16px; font-size: 13px; color: var(--color-text-muted); line-height: 1.5; }
+.suggest-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.suggest-grid .field-full { grid-column: 1 / -1; }
+.suggest-grid .suggest-sub {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  margin: 6px 0 -4px;
+}
+.suggest-grid select,
+.suggest-grid input[type="number"] {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 14px;
+  width: 100%;
+}
+.suggest-grid select:focus,
+.suggest-grid input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(26, 86, 219, 0.12);
+}
+.suggest-preview {
+  margin-top: 18px;
+  padding: 14px 16px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.suggest-preview strong { font-family: 'IBM Plex Mono', monospace; }
+.suggest-preview .ok { color: var(--color-success); }
+.suggest-preview .warn { color: var(--color-warning); }
+
 /* ===== Toast ===== */
 .toast {
   position: fixed;
