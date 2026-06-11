@@ -933,174 +933,243 @@ function toast(msg, ms = 2500) {
 }
 
 // ====== PDF export ======
+// Visuell paritet med appen: blå topptekst, kort-seksjoner, fargede vakttype-merker,
+// stripet tabell og signaturbokser. Bruker kun jsPDF-primitiver (ingen eksterne plugins).
+const PDF_CAT = {
+  dag:   { fill: [253, 230, 138], text: [120, 53, 15],  label: 'Dag' },
+  kveld: { fill: [253, 186, 116], text: [124, 45, 18],  label: 'Kveld' },
+  natt:  { fill: [199, 210, 254], text: [49, 46, 129],  label: 'Natt' },
+  helg:  { fill: [251, 207, 232], text: [131, 24, 67],  label: 'Helg' },
+};
+
 function generatePDF() {
   if (!window.jspdf) { toast('PDF-bibliotek ikke lastet'); return; }
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
-  const margin = 15;
-  let y = margin;
+  const M = 16;                    // sidemarg
+  const contentW = pageW - M * 2;
+  const FOOT = pageH - 18;         // nederste tillatte y for innhold
 
-  // Blue header box
-  doc.setFillColor(26, 86, 219);
-  doc.rect(0, 0, pageW, 28, 'F');
-  doc.setTextColor(255, 255, 255);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(16);
-  doc.text('DRØFTINGSNOTAT – TURNUS', margin, 13);
-  doc.setFontSize(10);
-  doc.setFont('helvetica', 'normal');
-  doc.text(`Avdeling: ${formData.avdeling}   ·   Leder: ${formData.avdelingsleder}`, margin, 21);
-  y = 36;
+  // Fargepalett (matcher appen)
+  const C = {
+    primary: [26, 86, 219], primaryDark: [30, 64, 175], dark: [15, 23, 42],
+    muted: [100, 116, 139], line: [226, 232, 240], zebra: [248, 250, 252],
+    panel: [241, 245, 249], green: [22, 163, 74], amber: [217, 119, 6], red: [220, 38, 38],
+  };
+  const setText = c => doc.setTextColor(c[0], c[1], c[2]);
+  const setFill = c => doc.setFillColor(c[0], c[1], c[2]);
+  const setDraw = c => doc.setDrawColor(c[0], c[1], c[2]);
 
-  doc.setTextColor(15, 23, 42);
+  // Trenger vi ny side for `h` mm innhold?
+  const ensure = h => { if (y + h > FOOT) { doc.addPage(); y = M; } };
 
-  // Info table
+  let y = 0;
+
+  // ---------- Topptekst ----------
+  function header() {
+    setFill(C.dark); doc.rect(0, 0, pageW, 30, 'F');
+    setFill(C.primary); doc.rect(0, 30, pageW, 1.4, 'F'); // blå aksentstripe
+    // logo-flate
+    setFill(C.primary); doc.roundedRect(M, 8, 14, 14, 2.5, 2.5, 'F');
+    doc.setTextColor(255, 255, 255); doc.setFont('helvetica', 'bold'); doc.setFontSize(12);
+    doc.text('T', M + 7, 17.5, { align: 'center' });
+    doc.setFontSize(17);
+    doc.text('Drøftingsnotat – turnus', M + 20, 15);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(203, 213, 225);
+    doc.text(`${formData.avdeling || 'Avdeling'}  ·  Leder: ${formData.avdelingsleder || '–'}`, M + 20, 23);
+  }
+  header();
+  y = 42;
+
+  // ---------- Nøkkelinfo-kort ----------
   const info = [
     ['Type turnus', formData.typeTurnus],
-    [formData.typeTurnus === 'Personlig' ? 'Navn' : 'Antall sjåfører',
+    [formData.typeTurnus === 'Personlig' ? 'Sjåfør / navn' : 'Antall sjåfører',
      formData.typeTurnus === 'Personlig' ? (formData.navn || '–') : String(formData.antallSjaforer)],
     ['Ikrafttredelsesdato', formatDateNO(formData.ikrafttredelsesdato)],
     ['Rullerende turnus', formData.rullerende ? 'Ja' : 'Nei'],
     ['Lastebil / FATS', formData.lastebil ? 'Ja' : 'Nei'],
   ];
-  doc.setFontSize(10);
-  info.forEach(([k, v]) => {
-    doc.setTextColor(100, 116, 139);
-    doc.text(k, margin, y);
-    doc.setTextColor(15, 23, 42);
-    doc.text(String(v || '–'), margin + 60, y);
-    y += 6;
+  const rows = Math.ceil(info.length / 2);
+  const infoH = 12 + rows * 9;
+  setFill(C.panel); setDraw(C.line); doc.setLineWidth(0.2);
+  doc.roundedRect(M, y, contentW, infoH, 2.5, 2.5, 'FD');
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(8); setText(C.muted);
+  doc.text('OPPLYSNINGER', M + 5, y + 7);
+  const colW = contentW / 2;
+  info.forEach(([k, v], i) => {
+    const cx = M + 5 + (i % 2) * colW;
+    const cy = y + 14 + Math.floor(i / 2) * 9;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8); setText(C.muted);
+    doc.text(k.toUpperCase(), cx, cy);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(10.5); setText(C.dark);
+    doc.text(String(v || '–'), cx, cy + 5);
   });
-  y += 4;
+  y += infoH + 8;
 
-  // Stillingsprosent
+  // ---------- Stillingsprosent-kort ----------
   const totalMin = weeks.reduce((sum, w) => sum + w.reduce((s, day) => s + day.reduce((a, sh) => a + shiftNet(sh), 0), 0), 0);
   const numWeeks = weeks.length || 1;
-  const avg = totalMin / numWeeks / 60;
-  const pct = (avg / 37.5) * 100;
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(11);
-  doc.text(`Stillingsprosent: ${pct.toFixed(1).replace('.', ',')}%`, margin, y);
-  y += 4;
-  // Bar
-  const barW = pageW - margin * 2;
-  doc.setDrawColor(203, 213, 225);
-  doc.setFillColor(241, 245, 249);
-  doc.rect(margin, y, barW, 5, 'FD');
-  const fillW = Math.min(barW, (Math.min(pct, 130) / 100) * barW);
-  if (pct > 100) doc.setFillColor(220, 38, 38);
-  else doc.setFillColor(22, 163, 74);
-  doc.rect(margin, y, fillW, 5, 'F');
-  // 100% marker
-  doc.setDrawColor(15, 23, 42);
-  doc.line(margin + barW * (100 / 130), y - 1, margin + barW * (100 / 130), y + 6);
-  y += 12;
+  const pct = (totalMin / numWeeks / 60 / 37.5) * 100;
+  const pctColor = pct > 100 ? C.red : (pct > 80 ? C.amber : C.green);
+  const cardH = 30;
+  setFill([255, 255, 255]); setDraw(C.line);
+  doc.roundedRect(M, y, contentW, cardH, 2.5, 2.5, 'FD');
+  // venstre: stor prosent
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8); setText(C.muted);
+  doc.text('STILLINGSPROSENT', M + 6, y + 8);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(24); setText(pctColor);
+  doc.text(pct.toFixed(1).replace('.', ',') + ' %', M + 6, y + 21);
+  // høyre: nøkkeltall
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8); setText(C.muted);
+  doc.text(`${weeks.length} uker  ·  ${(totalMin / 60).toFixed(1).replace('.', ',')} t totalt`, pageW - M - 6, y + 8, { align: 'right' });
+  doc.text(`Snitt ${(totalMin / numWeeks / 60).toFixed(1).replace('.', ',')} t/uke av 37,5 t`, pageW - M - 6, y + 13, { align: 'right' });
+  // måler-stolpe
+  const barX = M + 70, barW = contentW - 70 - 6, barY = y + 19, barH = 5;
+  setFill(C.panel); doc.roundedRect(barX, barY, barW, barH, 1, 1, 'F');
+  const fillW = Math.max(1.5, Math.min(barW, (Math.min(pct, 130) / 130) * barW));
+  setFill(pctColor); doc.roundedRect(barX, barY, fillW, barH, 1, 1, 'F');
+  // 100%-markør
+  setDraw(C.dark); doc.setLineWidth(0.4);
+  const mark = barX + barW * (100 / 130);
+  doc.line(mark, barY - 1.5, mark, barY + barH + 1.5);
+  doc.setFontSize(7); setText(C.muted);
+  doc.text('100%', mark, barY + barH + 4.5, { align: 'center' });
+  y += cardH + 10;
 
-  doc.setFont('helvetica', 'normal');
+  // ---------- Uketabeller ----------
+  const cols = { dag: M + 4, type: M + 34, start: M + 62, slutt: M + 86, lunsj: M + 110, net: M + 138 };
+  const drawTableHead = () => {
+    setFill(C.panel); doc.roundedRect(M, y, contentW, 7, 1, 1, 'F');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8); setText(C.muted);
+    doc.text('DAG', cols.dag, y + 4.7);
+    doc.text('TYPE', cols.type, y + 4.7);
+    doc.text('START', cols.start, y + 4.7);
+    doc.text('SLUTT', cols.slutt, y + 4.7);
+    doc.text('LUNSJ', cols.lunsj, y + 4.7);
+    doc.text('NETTOTID', cols.net, y + 4.7);
+    y += 7;
+  };
 
-  // Per week
-  const pageNumbers = [];
   weeks.forEach((week, wi) => {
-    if (y > pageH - 60) { doc.addPage(); y = margin; }
+    ensure(26);
     const wm = weekMeta[wi];
     const mon = isoWeekToDate(wm.num, wm.year);
     const sun = new Date(mon); sun.setUTCDate(mon.getUTCDate() + 6);
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(12);
-    doc.text(`Uke ${wm.num} ${wm.year}  (${formatDateShort(mon)}–${formatDateShort(sun)})`, margin, y);
-    y += 6;
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    const cols = [margin, margin + 30, margin + 60, margin + 90, margin + 130];
-    doc.setFillColor(241, 245, 249);
-    doc.rect(margin, y - 4, pageW - margin * 2, 6, 'F');
-    doc.setTextColor(100, 116, 139);
-    ['Dag', 'Start', 'Slutt', 'Lunsj', 'Nettotid'].forEach((h, i) => doc.text(h, cols[i], y));
-    y += 4;
-    doc.setTextColor(15, 23, 42);
-    doc.setFont('helvetica', 'normal');
-    let weekTotal = 0;
-    let hasAny = false;
+    // ukeoverskrift
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(12); setText(C.dark);
+    doc.text(`Uke ${wm.num}`, M, y + 4);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); setText(C.muted);
+    doc.text(`${formatDateShort(mon)}–${formatDateShort(sun)} ${wm.year}`, M + 26, y + 4);
+    y += 9;
+
+    drawTableHead();
+
+    let weekTotal = 0, hasAny = false, rowI = 0;
+    const rowH = 8;
     for (let di = 0; di < 7; di++) {
       week[di].forEach(s => {
         hasAny = true;
-        if (y > pageH - 25) { doc.addPage(); y = margin; }
-        const gross = shiftGross(s);
-        const lunch = lunchMinutes(gross);
-        const net = gross - lunch;
+        if (y + rowH > FOOT) { doc.addPage(); y = M; drawTableHead(); }
+        const gross = shiftGross(s), lunch = lunchMinutes(gross), net = gross - lunch;
         weekTotal += net;
-        doc.text(DAY_NAMES[di], cols[0], y);
-        doc.text(minutesToHHMM(s.start), cols[1], y);
-        doc.text(minutesToHHMM(s.end), cols[2], y);
-        doc.text(`${lunch} min`, cols[3], y);
-        doc.text(`${(net / 60).toFixed(2)} t`, cols[4], y);
-        y += 5;
+        const broken = fatsResult.shiftFlags[`${wi}-${di}-${rowI}`]; // info only
+        if (rowI % 2 === 1) { setFill(C.zebra); doc.rect(M, y, contentW, rowH, 'F'); }
+        const midY = y + rowH / 2 + 1.4;
+        // dag
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); setText(C.dark);
+        doc.text(DAY_NAMES[di], cols.dag, midY);
+        // type-merke
+        const cat = categorizeShift(wi, di, s);
+        const cs = PDF_CAT[cat] || PDF_CAT.dag;
+        const chipW = 16, chipH = 5;
+        setFill(cs.fill); doc.roundedRect(cols.type, y + rowH / 2 - chipH / 2, chipW, chipH, 1.5, 1.5, 'F');
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); setText(cs.text);
+        doc.text(cs.label, cols.type + chipW / 2, y + rowH / 2 + 1.1, { align: 'center' });
+        // tider
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); setText(C.dark);
+        doc.text(minutesToHHMM(s.start), cols.start, midY);
+        doc.text(minutesToHHMM(s.end), cols.slutt, midY);
+        setText(C.muted);
+        doc.text(lunch ? `${lunch} min` : '–', cols.lunsj, midY);
+        doc.setFont('helvetica', 'bold'); setText(C.dark);
+        doc.text(`${(net / 60).toFixed(2).replace('.', ',')} t`, cols.net, midY);
+        y += rowH;
+        rowI++;
       });
     }
     if (!hasAny) {
-      doc.setTextColor(100, 116, 139);
-      doc.text('Ingen vakter denne uken.', margin, y);
-      doc.setTextColor(15, 23, 42);
-      y += 5;
+      doc.setFont('helvetica', 'italic'); doc.setFontSize(9); setText(C.muted);
+      doc.text('Ingen vakter denne uken.', cols.dag, y + 5);
+      doc.setFont('helvetica', 'normal');
+      y += 8;
     }
-    doc.setFont('helvetica', 'bold');
-    doc.text(`Sum uke: ${(weekTotal / 60).toFixed(2)} t`, cols[4] - 14, y + 2);
-    doc.setFont('helvetica', 'normal');
-    y += 10;
+    // sumlinje
+    setDraw(C.line); doc.setLineWidth(0.3); doc.line(M, y, M + contentW, y);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); setText(C.dark);
+    doc.text('Sum uke', cols.lunsj, y + 5.5);
+    doc.text(`${(weekTotal / 60).toFixed(2).replace('.', ',')} t`, cols.net, y + 5.5);
+    y += 12;
   });
 
-  // Tilleggsinformasjon
+  // ---------- Tilleggsinformasjon ----------
   const sections = [
     ['Årsak til turnusendring', formData.aarsak],
     ['Fagforbundets syn / forslag', formData.fagforbundetSyn],
     ['Annen kommentar', formData.annenKommentar],
   ].filter(([, v]) => v && v.trim());
 
-  if (sections.length) {
-    if (y > pageH - 80) { doc.addPage(); y = margin; }
-    sections.forEach(([k, v]) => {
-      if (y > pageH - 30) { doc.addPage(); y = margin; }
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(11);
-      doc.text(k, margin, y);
+  sections.forEach(([k, v]) => {
+    const lines = doc.splitTextToSize(v, contentW - 8);
+    ensure(12 + lines.length * 5);
+    // venstre fargemerke + tittel
+    setFill(C.primary); doc.roundedRect(M, y - 3.5, 1.6, 5, 0.8, 0.8, 'F');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(10.5); setText(C.dark);
+    doc.text(k, M + 5, y);
+    y += 6;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(10); setText([51, 65, 85]);
+    lines.forEach(line => {
+      ensure(5);
+      doc.text(line, M + 5, y);
       y += 5;
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(10);
-      const lines = doc.splitTextToSize(v, pageW - margin * 2);
-      lines.forEach(line => {
-        if (y > pageH - 25) { doc.addPage(); y = margin; }
-        doc.text(line, margin, y);
-        y += 5;
-      });
-      y += 4;
     });
-  }
+    y += 5;
+  });
 
-  // Signatures (always at bottom of last page)
-  const sigY = pageH - 30;
-  if (y > sigY - 10) { doc.addPage(); }
-  const sigYFinal = pageH - 30;
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(10);
-  doc.text('Avdelingsleder: _______________________', margin, sigYFinal);
-  doc.text('Dato: ___________', margin, sigYFinal + 7);
-  doc.text('Tillitsvalgt / Fagforbundet: _______________________', pageW / 2, sigYFinal);
-  doc.text('Dato: ___________', pageW / 2, sigYFinal + 7);
+  // ---------- Signaturer ----------
+  ensure(36);
+  y = Math.max(y, FOOT - 32);
+  const boxW = (contentW - 8) / 2, boxH = 30;
+  [['Avdelingsleder', M], ['Tillitsvalgt / Fagforbundet', M + boxW + 8]].forEach(([label, bx]) => {
+    setDraw(C.line); setFill([255, 255, 255]); doc.setLineWidth(0.2);
+    doc.roundedRect(bx, y, boxW, boxH, 2, 2, 'FD');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8); setText(C.muted);
+    doc.text(label.toUpperCase(), bx + 4, y + 6);
+    setDraw(C.dark); doc.setLineWidth(0.3);
+    doc.line(bx + 4, y + 16, bx + boxW - 4, y + 16);   // signaturlinje
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); setText(C.muted);
+    doc.text('Signatur', bx + 4, y + 19.5);
+    doc.line(bx + 4, y + 24, bx + boxW / 2 - 2, y + 24); // datolinje
+    doc.text('Dato', bx + 4, y + 27.5);
+  });
 
-  // Page numbers
+  // ---------- Bunntekst på alle sider ----------
+  const today = new Date();
+  const genStr = `${String(today.getDate()).padStart(2, '0')}.${String(today.getMonth() + 1).padStart(2, '0')}.${today.getFullYear()}`;
   const totalPages = doc.internal.getNumberOfPages();
   for (let p = 1; p <= totalPages; p++) {
     doc.setPage(p);
-    doc.setFontSize(9);
-    doc.setTextColor(100, 116, 139);
-    doc.text(`Side ${p} av ${totalPages}`, pageW - margin, pageH - 8, { align: 'right' });
+    setDraw(C.line); doc.setLineWidth(0.2);
+    doc.line(M, pageH - 12, pageW - M, pageH - 12);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8); setText(C.muted);
+    doc.text(`Generert ${genStr} · Turnusgenerator`, M, pageH - 7);
+    doc.text(`Side ${p} av ${totalPages}`, pageW - M, pageH - 7, { align: 'right' });
   }
 
-  const today = new Date();
   const dateStr = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
-  const filename = `Drøftingsnotat_${formData.avdeling || 'turnus'}_${dateStr}.pdf`;
+  const filename = `Drøftingsnotat_${(formData.avdeling || 'turnus').replace(/\s+/g, '_')}_${dateStr}.pdf`;
   doc.save(filename);
   return filename;
 }
