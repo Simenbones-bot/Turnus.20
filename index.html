@@ -7,12 +7,20 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20260522" />
+<link rel="stylesheet" href="style.css?v=20260611" />
 </head>
 <body>
 
 <header class="top-header">
   <div class="top-header-inner">
+    <span class="top-header-logo" aria-hidden="true">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+        <rect x="3" y="5" width="18" height="16" rx="3" stroke="currentColor" stroke-width="2"/>
+        <path d="M3 10h18" stroke="currentColor" stroke-width="2"/>
+        <path d="M8 3v4M16 3v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <path d="M7.5 14.5h3M7.5 17.5h3M13.5 14.5h3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </span>
     <span class="top-header-title">Turnusgenerator</span>
     <span class="top-header-sub">Drøftingsverktøy</span>
   </div>
@@ -125,7 +133,7 @@
           <h2>Vakter</h2>
           <p>Klikk og dra på en dag for å lage en vakt · dra kantene for å justere</p>
         </div>
-        <button type="button" class="btn btn-outline btn-sm" id="btn-suggest">✨ Foreslå turnus</button>
+        <button type="button" class="btn btn-accent btn-sm" id="btn-suggest">✨ Foreslå turnus</button>
         <span class="section-complete" id="shifts-complete" hidden>✓ Komplett</span>
       </header>
 
@@ -143,7 +151,8 @@
 
       <div class="detail-list" id="detail-list"></div>
 
-      <p class="hint">FATS-validering kjører automatisk etter hver endring. Brudd vises i panelet til høyre.</p>
+      <p class="hint">Tips: dobbeltklikk på en ukefane for å endre ukenummer · ⧉ kopierer uken til en ny.
+        FATS-validering kjører automatisk etter hver endring.</p>
     </section>
 
     <!-- SECTION 3 -->
@@ -191,8 +200,12 @@
       </div>
 
       <div class="gauge-scale">
-        <span>STILLINGSPROSENT</span>
-        <span class="mono">0 — 100% — 130%</span>
+        <div class="scale-bar"><span class="scale-mark" style="left: 76.9%"></span></div>
+        <div class="scale-labels mono">
+          <span>0%</span>
+          <span class="scale-100" style="left: 76.9%">100%</span>
+          <span>130%</span>
+        </div>
       </div>
     </div>
 
@@ -227,6 +240,13 @@
   <span>© Turnusgenerator · Drøftingsverktøy</span>
   <span class="mono">Versjon 1.0</span>
 </footer>
+
+<!-- Compact stat bar on mobile (summary is below the fold there) -->
+<button type="button" class="mobile-statbar" id="mobile-statbar" aria-label="Gå til oppsummering">
+  <span class="msb-item"><strong class="mono" id="msb-pct">0%</strong><small>STILLING</small></span>
+  <span class="msb-item"><strong class="mono" id="msb-sum">0 t</strong><small>SUM</small></span>
+  <span class="msb-go">Oppsummering ↓</span>
+</button>
 
 <!-- Modal: edit shift on mobile -->
 <div class="modal-backdrop" id="modal-backdrop" hidden>
@@ -280,6 +300,6 @@
 <div id="toast" class="toast" hidden></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script src="app.js?v=20260522"></script>
+<script src="app.js?v=20260611"></script>
 </body>
 </html>

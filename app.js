@@ -229,11 +229,13 @@ function updateAutosaveHint() {
   if (!el) return;
   if (!lastSavedAt) {
     el.textContent = 'Ikke lagret ennå';
+    el.classList.remove('saved');
   } else {
     const t = lastSavedAt;
     const hh = String(t.getHours()).padStart(2, '0');
     const mm = String(t.getMinutes()).padStart(2, '0');
-    el.textContent = `Sist lagret kl. ${hh}:${mm} · auto-lagret som utkast`;
+    el.textContent = `✓ Sist lagret kl. ${hh}:${mm} · auto-lagret som utkast`;
+    el.classList.add('saved');
   }
 }
 
@@ -300,6 +302,7 @@ function renderWeekTabs() {
     if (i === activeWeek) tab.classList.add('active');
     if (fatsResult.weekFlags[i] === 'broken') tab.classList.add('fats-broken');
     if (fatsResult.weekFlags[i] === 'warn') tab.classList.add('fats-warn');
+    tab.title = 'Dobbeltklikk for å endre ukenummer og år';
     tab.innerHTML = `<span class="tab-label">Uke ${wm.num}</span>` +
                     `<span class="tab-year mono">'${String(wm.year).slice(-2)}</span>`;
     tab.addEventListener('click', e => {
@@ -320,7 +323,7 @@ function renderWeekTabs() {
           activeWeek = clamp(activeWeek, 0, weeks.length - 1);
           scheduleSave();
           renderAll();
-        });
+        }, { danger: true, okLabel: 'Slett uke' });
       });
       tab.appendChild(close);
     }
@@ -330,9 +333,17 @@ function renderWeekTabs() {
   addBtn.type = 'button';
   addBtn.className = 'week-tab-add';
   addBtn.textContent = '+';
-  addBtn.title = 'Legg til ny uke';
+  addBtn.title = 'Legg til ny (tom) uke';
   addBtn.addEventListener('click', addWeek);
   tabs.appendChild(addBtn);
+
+  const dupBtn = document.createElement('button');
+  dupBtn.type = 'button';
+  dupBtn.className = 'week-tab-add';
+  dupBtn.textContent = '⧉';
+  dupBtn.title = 'Kopier aktiv uke til ny uke';
+  dupBtn.addEventListener('click', duplicateWeek);
+  tabs.appendChild(dupBtn);
 }
 
 function editWeekTab(i, tabEl) {
@@ -362,16 +373,32 @@ function editWeekTab(i, tabEl) {
   yearInp.addEventListener('keydown', onKey);
 }
 
-function addWeek() {
+function nextWeekMeta() {
   const last = weekMeta[weekMeta.length - 1] || { num: 1, year: new Date().getFullYear() };
   const max = isoWeeksInYear(last.year);
   let num = last.num + 1, year = last.year;
   if (num > max) { num = 1; year += 1; }
-  weekMeta.push({ num, year });
+  return { num, year };
+}
+
+function addWeek() {
+  weekMeta.push(nextWeekMeta());
   weeks.push(emptyWeek());
   activeWeek = weeks.length - 1;
   scheduleSave();
   renderAll();
+}
+
+function duplicateWeek() {
+  const src = weeks[activeWeek];
+  if (!src) return;
+  const meta = nextWeekMeta();
+  weekMeta.push(meta);
+  weeks.push(src.map(day => day.map(s => ({ ...s }))));
+  activeWeek = weeks.length - 1;
+  scheduleSave();
+  renderAll();
+  toast(`Uke ${meta.num} opprettet som kopi`);
 }
 
 function renderDateRange() {
@@ -407,6 +434,8 @@ function renderTimeline() {
   root.appendChild(header);
 
   const week = weeks[activeWeek] || emptyWeek();
+  const wm = weekMeta[activeWeek];
+  const monday = wm ? isoWeekToDate(wm.num, wm.year) : null;
   for (let di = 0; di < 7; di++) {
     const row = document.createElement('div');
     row.className = 'timeline-row';
@@ -414,6 +443,14 @@ function renderTimeline() {
     const dayLabel = document.createElement('div');
     dayLabel.className = 'day-label';
     dayLabel.textContent = DAY_SHORT[di];
+    if (monday) {
+      const d = new Date(monday);
+      d.setUTCDate(monday.getUTCDate() + di);
+      const date = document.createElement('span');
+      date.className = 'day-date';
+      date.textContent = formatDateShort(d);
+      dayLabel.appendChild(date);
+    }
     const track = document.createElement('div');
     track.className = 'day-track';
     track.dataset.day = di;
@@ -452,6 +489,15 @@ function renderTimeline() {
     row.appendChild(track);
     root.appendChild(row);
   }
+
+  // First-use hint when the week is empty
+  if (!week.some(d => d.length)) {
+    const overlay = document.createElement('div');
+    overlay.className = 'timeline-hint-overlay';
+    const txt = isMobile() ? 'Trykk på en dag for å legge til vakt' : 'Klikk og dra på en dag for å lage en vakt';
+    overlay.innerHTML = `<span>👆 ${txt}</span>`;
+    root.appendChild(overlay);
+  }
 }
 
 function renderDetailList() {
@@ -466,7 +512,8 @@ function renderDetailList() {
       const net = gross - lunch;
       total += net;
       const broken = fatsResult.shiftFlags[`${activeWeek}-${di}-${si}`] === 'broken';
-      rows.push({ di, si, s, lunch, net, broken });
+      const cat = categorizeShift(activeWeek, di, s);
+      rows.push({ di, si, s, lunch, net, broken, cat });
     });
   }
   if (!rows.length) {
@@ -475,12 +522,14 @@ function renderDetailList() {
   }
   let html = `<table>
     <thead>
-      <tr><th>Dag</th><th>Start</th><th>Slutt</th><th>Lunsj</th><th>Nettotid</th><th></th></tr>
+      <tr><th>Dag</th><th>Type</th><th>Start</th><th>Slutt</th><th>Lunsj</th><th>Nettotid</th><th></th></tr>
     </thead>
     <tbody>`;
   rows.forEach(r => {
+    const catLabel = r.cat.charAt(0).toUpperCase() + r.cat.slice(1);
     html += `<tr class="${r.broken ? 'row-broken' : ''}">
       <td>${DAY_NAMES[r.di]}</td>
+      <td><span class="cat-chip chip-${r.cat}">${catLabel}</span></td>
       <td class="mono">${minutesToHHMM(r.s.start)}</td>
       <td class="mono">${minutesToHHMM(r.s.end)}</td>
       <td class="mono">${r.lunch} min</td>
@@ -490,7 +539,7 @@ function renderDetailList() {
   });
   html += `</tbody>
     <tfoot>
-      <tr><td colspan="4" style="text-align:right; font-weight:600;">Sum uke:</td><td class="mono" style="font-weight:600;">${(total / 60).toFixed(2)} t</td><td></td></tr>
+      <tr><td colspan="5" style="text-align:right; font-weight:600;">Sum uke:</td><td class="mono" style="font-weight:600;">${(total / 60).toFixed(2)} t</td><td></td></tr>
     </tfoot>
   </table>`;
   root.innerHTML = html;
@@ -520,7 +569,7 @@ function renderSummary() {
   const title = (formData.avdeling || 'Avdeling') + ' · Rotasjon på ' + weeks.length + ' uke' + (weeks.length === 1 ? '' : 'r');
   document.getElementById('sum-title').textContent = title;
 
-  // Gauge arc + needle
+  // Gauge arc + needle (needle is the vertical line in markup, rotated via CSS for smooth animation)
   const clamped = Math.min(pct, 130) / 130; // 0..1
   // The full arc path length ~ pi * 80 ≈ 251.3
   const arcLen = Math.PI * 80;
@@ -529,14 +578,16 @@ function renderSummary() {
   arc.setAttribute('stroke-dasharray', `${dash} ${arcLen}`);
   arc.setAttribute('stroke', pct > 100 ? '#dc2626' : (pct > 80 ? '#d97706' : '#16a34a'));
   const needle = document.getElementById('gauge-needle');
-  const angle = clamped * 180 - 180; // -180 deg (left) to 0 deg (right)
-  const rad = angle * Math.PI / 180;
-  const cx = 100, cy = 100, r = 72;
-  const x = cx + Math.cos(rad) * r;
-  const y = cy + Math.sin(rad) * r;
-  needle.setAttribute('x2', x);
-  needle.setAttribute('y2', y);
+  needle.style.transform = `rotate(${clamped * 180 - 90}deg)`; // -90 (left) to +90 (right)
   needle.setAttribute('stroke', pct > 100 ? '#dc2626' : '#0f172a');
+
+  // Mobile stat bar mirrors the key numbers
+  const msbPct = document.getElementById('msb-pct');
+  if (msbPct) {
+    msbPct.textContent = pct.toFixed(1).replace('.', ',') + '%';
+    msbPct.classList.toggle('over', pct > 100);
+    document.getElementById('msb-sum').textContent = (totalMin / 60).toFixed(1).replace('.', ',') + ' t';
+  }
 }
 
 function renderFatsPanel() {
@@ -843,13 +894,33 @@ function openShiftModal(di) {
 }
 
 // ====== Confirm dialog ======
-function confirmDialog(title, text, onOk) {
+function confirmDialog(title, text, onOk, opts = {}) {
   const bd = document.getElementById('confirm-backdrop');
   document.getElementById('confirm-title').textContent = title;
   document.getElementById('confirm-text').textContent = text;
+  const ok = document.getElementById('confirm-ok');
+  ok.className = 'btn ' + (opts.danger ? 'btn-danger' : 'btn-primary');
+  ok.textContent = opts.okLabel || 'OK';
   bd.hidden = false;
   document.getElementById('confirm-cancel').onclick = () => { bd.hidden = true; };
-  document.getElementById('confirm-ok').onclick = () => { bd.hidden = true; onOk && onOk(); };
+  ok.onclick = () => { bd.hidden = true; onOk && onOk(); };
+}
+
+// ====== Modal dismissal (Escape / click outside) ======
+function closeBackdrop(bd) {
+  bd.hidden = true;
+  // The mobile shift modal edits state directly; re-render to reflect it
+  if (bd.id === 'modal-backdrop') { scheduleSave(); renderAll(); }
+}
+function wireModalDismiss() {
+  document.querySelectorAll('.modal-backdrop').forEach(bd => {
+    bd.addEventListener('mousedown', e => { if (e.target === bd) closeBackdrop(bd); });
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    const open = [...document.querySelectorAll('.modal-backdrop')].find(b => !b.hidden);
+    if (open) closeBackdrop(open);
+  });
 }
 
 // ====== Toast ======
@@ -1395,7 +1466,8 @@ function openSuggestModal() {
     const hasExisting = weeks.some(w => w.some(d => d.length));
     if (hasExisting) {
       confirmDialog('Erstatte gjeldende turnus?',
-        'Forslaget erstatter alle vaktene du har lagt inn nå.', commit);
+        'Forslaget erstatter alle vaktene du har lagt inn nå.', commit,
+        { danger: true, okLabel: 'Erstatt' });
     } else {
       commit();
     }
@@ -1435,7 +1507,11 @@ function init() {
   wireForm();
   wireTimeline();
   wireActions();
+  wireModalDismiss();
   document.getElementById('btn-suggest').addEventListener('click', openSuggestModal);
+  document.getElementById('mobile-statbar').addEventListener('click', () => {
+    document.getElementById('sticky-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
   renderAll();
 }
 document.addEventListener('DOMContentLoaded', init);
