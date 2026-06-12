@@ -1772,143 +1772,203 @@ function toast(msg, ms = 2500) {
 }
 
 // ====== PDF export ======
+// ====== PDF export ======
+// Visuell paritet med appen: blå topptekst, kort-seksjoner, fargede vakttype-merker,
+// stripede tabeller og signaturbokser. All beregningslogikk (shiftPaid, FATS-kolonner,
+// rotasjon, døgnskille-fotnoter) er bevart – kun det visuelle er fornyet.
+const PDF_CAT = {
+  dag:   { fill: [253, 230, 138], text: [120, 53, 15],  dot: [217, 160, 30],  label: 'Dag' },
+  kveld: { fill: [253, 186, 116], text: [124, 45, 18],  dot: [201, 100, 40],  label: 'Kveld' },
+  natt:  { fill: [199, 210, 254], text: [49, 46, 129],  dot: [99, 102, 220],  label: 'Natt' },
+  helg:  { fill: [251, 207, 232], text: [131, 24, 67],  dot: [216, 90, 150],  label: 'Helg' },
+};
+
 function generatePDF() {
   if (!window.jspdf) { toast('PDF-bibliotek ikke lastet'); return; }
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
-  const margin = 15;
-  let y = margin;
+  const M = 16;
+  const contentW = pageW - M * 2;
+  const FOOT = pageH - 18;
+  const fatsPdf = !!lastebil;
 
-  // Blue header box
-  doc.setFillColor(26, 86, 219);
-  doc.rect(0, 0, pageW, 28, 'F');
-  doc.setTextColor(255, 255, 255);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(16);
-  doc.text('DRØFTINGSNOTAT – TURNUS', margin, 13);
-  doc.setFontSize(10);
-  doc.setFont('helvetica', 'normal');
-  doc.text(`Avdeling: ${formData.avdeling}   ·   Leder: ${formData.avdelingsleder}`, margin, 21);
-  y = 36;
+  const C = {
+    primary: [26, 86, 219], dark: [15, 23, 42], muted: [100, 116, 139],
+    line: [226, 232, 240], zebra: [248, 250, 252], panel: [241, 245, 249],
+    green: [22, 163, 74], amber: [217, 119, 6], red: [220, 38, 38], body: [51, 65, 85],
+  };
+  const setText = c => doc.setTextColor(c[0], c[1], c[2]);
+  const setFill = c => doc.setFillColor(c[0], c[1], c[2]);
+  const setDraw = c => doc.setDrawColor(c[0], c[1], c[2]);
+  const ensure = h => { if (y + h > FOOT) { doc.addPage(); y = M; } };
+  const fmtHrMinShort = mins => {
+    if (!mins) return '–';
+    const h = Math.floor(mins / 60), m = mins % 60;
+    return m === 0 ? `${h} t` : `${h} t ${m} m`;
+  };
+  const fmtT = mins => `${(mins / 60).toFixed(2).replace('.', ',')} t`;
 
-  doc.setTextColor(15, 23, 42);
+  let y = 0;
 
-  // Info table
+  // ---------- Topptekst ----------
+  setFill(C.dark); doc.rect(0, 0, pageW, 30, 'F');
+  setFill(C.primary); doc.rect(0, 30, pageW, 1.4, 'F');
+  setFill(C.primary); doc.roundedRect(M, 8, 14, 14, 2.5, 2.5, 'F');
+  doc.setTextColor(255, 255, 255); doc.setFont('helvetica', 'bold'); doc.setFontSize(12);
+  doc.text('T', M + 7, 17.5, { align: 'center' });
+  doc.setFontSize(17);
+  doc.text('Drøftingsnotat – turnus', M + 20, 15);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(203, 213, 225);
+  doc.text(`${formData.avdeling || 'Avdeling'}  ·  Leder: ${formData.avdelingsleder || '–'}`, M + 20, 23);
+  y = 42;
+
+  // ---------- Nøkkelinfo-kort ----------
   const info = [
     ['Type turnus', formData.typeTurnus],
-    [formData.typeTurnus === 'Personlig' ? 'Navn' : 'Antall sjåfører',
+    [formData.typeTurnus === 'Personlig' ? 'Sjåfør / navn' : 'Antall sjåfører',
      formData.typeTurnus === 'Personlig' ? (formData.navn || '–') : String(formData.antallSjaforer)],
     ['Ikrafttredelsesdato', formatDateNO(formData.ikrafttredelsesdato)],
     ['Rullerende turnus', formData.rullerende ? 'Ja' : 'Nei'],
     ['Lastebil / FATS', formData.lastebil ? 'Ja' : 'Nei'],
   ];
-  doc.setFontSize(10);
-  info.forEach(([k, v]) => {
-    doc.setTextColor(100, 116, 139);
-    doc.text(k, margin, y);
-    doc.setTextColor(15, 23, 42);
-    doc.text(String(v || '–'), margin + 60, y);
-    y += 6;
+  const infoRows = Math.ceil(info.length / 2);
+  const infoH = 12 + infoRows * 9;
+  setFill(C.panel); setDraw(C.line); doc.setLineWidth(0.2);
+  doc.roundedRect(M, y, contentW, infoH, 2.5, 2.5, 'FD');
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(8); setText(C.muted);
+  doc.text('OPPLYSNINGER', M + 5, y + 7);
+  const colW = contentW / 2;
+  info.forEach(([k, v], i) => {
+    const cx = M + 5 + (i % 2) * colW;
+    const cy = y + 14 + Math.floor(i / 2) * 9;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8); setText(C.muted);
+    doc.text(k.toUpperCase(), cx, cy);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(10.5); setText(C.dark);
+    doc.text(String(v || '–'), cx, cy + 5);
   });
-  y += 4;
+  y += infoH + 8;
 
-  // Stillingsprosent
+  // ---------- Stillingsprosent-kort ----------
   const totalMin = weeks.reduce((sum, w) => sum + w.reduce((s, day) => s + day.reduce((a, sh) => a + shiftPaid(sh), 0), 0), 0);
   const numWeeks = weeks.length || 1;
-  const avg = totalMin / numWeeks / 60;
-  const pct = (avg / 37.5) * 100;
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(11);
-  doc.text(`Stillingsprosent: ${pct.toFixed(1).replace('.', ',')}%`, margin, y);
-  y += 4;
-  // Bar
-  const barW = pageW - margin * 2;
-  doc.setDrawColor(203, 213, 225);
-  doc.setFillColor(241, 245, 249);
-  doc.rect(margin, y, barW, 5, 'FD');
-  const fillW = Math.min(barW, (Math.min(pct, 130) / 100) * barW);
-  if (pct > 100) doc.setFillColor(220, 38, 38);
-  else doc.setFillColor(22, 163, 74);
-  doc.rect(margin, y, fillW, 5, 'F');
-  // 100% marker
-  doc.setDrawColor(15, 23, 42);
-  doc.line(margin + barW * (100 / 130), y - 1, margin + barW * (100 / 130), y + 6);
-  y += 12;
+  const pct = (totalMin / numWeeks / 60 / 37.5) * 100;
+  const pctColor = pct > 100 ? C.red : (pct > 80 ? C.amber : C.green);
+  const cardH = 30;
+  setFill([255, 255, 255]); setDraw(C.line);
+  doc.roundedRect(M, y, contentW, cardH, 2.5, 2.5, 'FD');
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8); setText(C.muted);
+  doc.text('STILLINGSPROSENT', M + 6, y + 8);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(24); setText(pctColor);
+  doc.text(pct.toFixed(1).replace('.', ',') + ' %', M + 6, y + 21);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8); setText(C.muted);
+  doc.text(`${weeks.length} uker  ·  ${(totalMin / 60).toFixed(1).replace('.', ',')} t totalt`, pageW - M - 6, y + 8, { align: 'right' });
+  doc.text(`Snitt ${(totalMin / numWeeks / 60).toFixed(1).replace('.', ',')} t/uke av 37,5 t`, pageW - M - 6, y + 13, { align: 'right' });
+  const barX = M + 70, barW = contentW - 70 - 6, barY = y + 19, barH = 5;
+  setFill(C.panel); doc.roundedRect(barX, barY, barW, barH, 1, 1, 'F');
+  const fillW = Math.max(1.5, Math.min(barW, (Math.min(pct, 130) / 130) * barW));
+  setFill(pctColor); doc.roundedRect(barX, barY, fillW, barH, 1, 1, 'F');
+  setDraw(C.dark); doc.setLineWidth(0.4);
+  const mark = barX + barW * (100 / 130);
+  doc.line(mark, barY - 1.5, mark, barY + barH + 1.5);
+  doc.setFontSize(7); setText(C.muted);
+  doc.text('100%', mark, barY + barH + 4.5, { align: 'center' });
+  y += cardH + 10;
 
-  doc.setFont('helvetica', 'normal');
+  // ---------- Uketabeller ----------
+  const colsN = { dag: M + 4, type: M + 32, start: M + 60, slutt: M + 84, lunsj: M + 108, net: M + 140 };
+  const colsF = { dag: M + 6, start: M + 32, slutt: M + 50, lunsj: M + 68, avail: M + 88, arb: M + 116, lonn: M + 146 };
+  const rowH = fatsPdf ? 7 : 8;
 
-  // Per week
-  const pageNumbers = [];
-  weeks.forEach((week, wi) => {
-    if (y > pageH - 60) { doc.addPage(); y = margin; }
-    const wm = weekMeta[wi];
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(12);
-    let weekTitle;
-    if (isRotasjon()) {
-      weekTitle = `Uke ${wm.num}`;
+  const drawTableHead = () => {
+    setFill(C.panel); doc.roundedRect(M, y, contentW, 7, 1, 1, 'F');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8); setText(C.muted);
+    if (fatsPdf) {
+      doc.text('DAG', colsF.dag, y + 4.7);
+      doc.text('START', colsF.start, y + 4.7);
+      doc.text('SLUTT', colsF.slutt, y + 4.7);
+      doc.text('LUNSJ', colsF.lunsj, y + 4.7);
+      doc.text('TILGJENG.', colsF.avail, y + 4.7);
+      doc.text('ARBEIDSTID', colsF.arb, y + 4.7);
+      doc.text('LØNNSTID', colsF.lonn, y + 4.7);
     } else {
+      doc.text('DAG', colsN.dag, y + 4.7);
+      doc.text('TYPE', colsN.type, y + 4.7);
+      doc.text('START', colsN.start, y + 4.7);
+      doc.text('SLUTT', colsN.slutt, y + 4.7);
+      doc.text('LUNSJ', colsN.lunsj, y + 4.7);
+      doc.text('NETTOTID', colsN.net, y + 4.7);
+    }
+    y += 7;
+  };
+
+  weeks.forEach((week, wi) => {
+    ensure(24);
+    const wm = weekMeta[wi];
+    // Ukeoverskrift (respekterer rotasjon)
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(12); setText(C.dark);
+    doc.text(`Uke ${wm.num}`, M, y + 4);
+    if (!isRotasjon()) {
       const mon = isoWeekToDate(wm.num, wm.year);
       const sun = new Date(mon); sun.setUTCDate(mon.getUTCDate() + 6);
-      weekTitle = `Uke ${wm.num}, ${wm.year}  (${formatDateShort(mon)}–${formatDateShort(sun)})`;
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(9); setText(C.muted);
+      doc.text(`${formatDateShort(mon)}–${formatDateShort(sun)} ${wm.year}`, M + 26, y + 4);
     }
-    doc.text(weekTitle, margin, y);
-    y += 6;
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    const fatsPdf = !!lastebil;
-    const cols = fatsPdf
-      ? [margin, margin + 28, margin + 46, margin + 64, margin + 86, margin + 116, margin + 148]
-      : [margin, margin + 30, margin + 60, margin + 90, margin + 130];
-    doc.setFillColor(241, 245, 249);
-    doc.rect(margin, y - 4, pageW - margin * 2, 6, 'F');
-    doc.setTextColor(100, 116, 139);
-    const headers = fatsPdf
-      ? ['Dag', 'Start', 'Slutt', 'Lunsj', 'Tilgjeng.', 'Arbeidstid', 'Lønnstid']
-      : ['Dag', 'Start', 'Slutt', 'Lunsj', 'Nettotid'];
-    headers.forEach((h, i) => doc.text(h, cols[i], y));
-    y += 4;
-    doc.setTextColor(15, 23, 42);
-    doc.setFont('helvetica', 'normal');
-    let weekTotalNet = 0;
-    let weekTotalAvail = 0;
-    let weekTotalPaid = 0;
-    let hasAny = false;
+    y += 9;
+    drawTableHead();
+
+    let weekTotalNet = 0, weekTotalAvail = 0, weekTotalPaid = 0;
+    let hasAny = false, rowI = 0;
     const footnotes = [];
-    const fmtHrMinShort = mins => {
-      if (!mins) return '';
-      const h = Math.floor(mins / 60);
-      const m = mins % 60;
-      return m === 0 ? `${h} t` : `${h} t ${m} m`;
+
+    // Tegner én rad og håndterer striping/sideskift
+    const printRow = (dayName, s, lunch, avail, paid, net, cat) => {
+      if (y + rowH > FOOT) { doc.addPage(); y = M; drawTableHead(); }
+      if (rowI % 2 === 1) { setFill(C.zebra); doc.rect(M, y, contentW, rowH, 'F'); }
+      const midY = y + rowH / 2 + 1.4;
+      const cs = PDF_CAT[cat] || PDF_CAT.dag;
+      if (fatsPdf) {
+        setFill(cs.dot); doc.circle(colsF.dag - 2.5, y + rowH / 2, 1.1, 'F');
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(9); setText(C.dark);
+        doc.text(dayName, colsF.dag, midY);
+        doc.text(minutesToHHMM(s.start), colsF.start, midY);
+        doc.text(minutesToHHMM(s.end), colsF.slutt, midY);
+        setText(C.muted); doc.text(lunch ? `${lunch} min` : '–', colsF.lunsj, midY);
+        setText(C.body); doc.text(fmtHrMinShort(avail), colsF.avail, midY);
+        doc.text(fmtT(paid), colsF.arb, midY);
+        doc.setFont('helvetica', 'bold'); setText(C.dark); doc.text(fmtT(paid), colsF.lonn, midY);
+      } else {
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); setText(C.dark);
+        doc.text(dayName, colsN.dag, midY);
+        const chipW = 16, chipH = 5;
+        setFill(cs.fill); doc.roundedRect(colsN.type, y + rowH / 2 - chipH / 2, chipW, chipH, 1.5, 1.5, 'F');
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); setText(cs.text);
+        doc.text(cs.label, colsN.type + chipW / 2, y + rowH / 2 + 1.1, { align: 'center' });
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); setText(C.dark);
+        doc.text(minutesToHHMM(s.start), colsN.start, midY);
+        doc.text(minutesToHHMM(s.end), colsN.slutt, midY);
+        setText(C.muted); doc.text(lunch ? `${lunch} min` : '–', colsN.lunsj, midY);
+        doc.setFont('helvetica', 'bold'); setText(C.dark); doc.text(fmtT(net), colsN.net, midY);
+      }
+      y += rowH;
+      rowI++;
     };
 
-    // Cross-week continuation from prev week's Sunday
+    // Fortsettelse fra forrige ukes søndag (vakt over døgnskillet)
     if (wi > 0 && weeks[wi - 1]) {
       (weeks[wi - 1][6] || []).forEach(s => {
         if (s.end > TIMELINE_END) {
           hasAny = true;
-          if (y > pageH - 25) { doc.addPage(); y = margin; }
           const split = splitShiftAcrossWeeks(s, 6);
           weekTotalNet += split.nextWeekNet;
           weekTotalAvail += split.nextWeekAvail;
           weekTotalPaid += split.nextWeekPaid;
           const prevUkeNum = weekMeta[wi - 1] ? weekMeta[wi - 1].num : '?';
-          const note = `* Fra uke ${prevUkeNum}`;
-          footnotes.push(note);
-          doc.text(`${DAY_NAMES[6]}–${DAY_NAMES[0]}*`, cols[0], y);
-          doc.text(minutesToHHMM(s.start), cols[1], y);
-          doc.text(minutesToHHMM(s.end), cols[2], y);
-          doc.text(`${split.nextWeekLunch} min`, cols[3], y);
-          if (fatsPdf) {
-            doc.text(fmtHrMinShort(split.nextWeekAvail), cols[4], y);
-            doc.text(`${(split.nextWeekPaid / 60).toFixed(2)} t`, cols[5], y);
-            doc.text(`${(split.nextWeekPaid / 60).toFixed(2)} t`, cols[6], y);
-          } else {
-            doc.text(`${(split.nextWeekNet / 60).toFixed(2)} t`, cols[4], y);
-          }
-          y += 5;
+          footnotes.push(`* Fra uke ${prevUkeNum}`);
+          printRow(`${DAY_NAMES[6]}–${DAY_NAMES[0]}*`, s, split.nextWeekLunch,
+                   split.nextWeekAvail, split.nextWeekPaid, split.nextWeekNet,
+                   categorizeShift(wi - 1, 6, s));
         }
       });
     }
@@ -1916,110 +1976,104 @@ function generatePDF() {
     for (let di = 0; di < 7; di++) {
       week[di].forEach(s => {
         hasAny = true;
-        if (y > pageH - 25) { doc.addPage(); y = margin; }
         const split = splitShiftAcrossWeeks(s, di);
         weekTotalNet += split.currentWeekNet;
         weekTotalAvail += split.currentWeekAvail;
         weekTotalPaid += split.currentWeekPaid;
-        const isSundayCW = isSundayCrossWeek(s, di);
-        let pdfDayName;
-        if (isSundayCW) {
-          pdfDayName = `${DAY_NAMES[6]}–${DAY_NAMES[0]}*`;
+        let dayName;
+        if (isSundayCrossWeek(s, di)) {
+          dayName = `${DAY_NAMES[6]}–${DAY_NAMES[0]}*`;
           const nextUkeNum = weekMeta[wi + 1] ? weekMeta[wi + 1].num : '?';
           footnotes.push(`* Fortsetter i uke ${nextUkeNum}`);
         } else if (s.end > TIMELINE_END && di + 1 < 7) {
-          pdfDayName = `${DAY_NAMES[di]}–${DAY_NAMES[di + 1]}`;
+          dayName = `${DAY_NAMES[di]}–${DAY_NAMES[di + 1]}`;
         } else {
-          pdfDayName = DAY_NAMES[di];
+          dayName = DAY_NAMES[di];
         }
-        doc.text(pdfDayName, cols[0], y);
-        doc.text(minutesToHHMM(s.start), cols[1], y);
-        doc.text(minutesToHHMM(s.end), cols[2], y);
-        doc.text(`${split.currentWeekLunch} min`, cols[3], y);
-        if (fatsPdf) {
-          doc.text(fmtHrMinShort(split.currentWeekAvail), cols[4], y);
-          doc.text(`${(split.currentWeekPaid / 60).toFixed(2)} t`, cols[5], y);
-          doc.text(`${(split.currentWeekPaid / 60).toFixed(2)} t`, cols[6], y);
-        } else {
-          doc.text(`${(split.currentWeekNet / 60).toFixed(2)} t`, cols[4], y);
-        }
-        y += 5;
+        printRow(dayName, s, split.currentWeekLunch, split.currentWeekAvail,
+                 split.currentWeekPaid, split.currentWeekNet, categorizeShift(wi, di, s));
       });
     }
+
     if (!hasAny) {
-      doc.setTextColor(100, 116, 139);
-      doc.text('Ingen vakter denne uken.', margin, y);
-      doc.setTextColor(15, 23, 42);
-      y += 5;
+      doc.setFont('helvetica', 'italic'); doc.setFontSize(9); setText(C.muted);
+      doc.text('Ingen vakter denne uken.', (fatsPdf ? colsF.dag : colsN.dag), y + 5);
+      doc.setFont('helvetica', 'normal');
+      y += 8;
     }
-    doc.setFont('helvetica', 'bold');
+
+    // Sumlinje
+    setDraw(C.line); doc.setLineWidth(0.3); doc.line(M, y, M + contentW, y);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); setText(C.dark);
     if (fatsPdf) {
-      doc.text(`Sum: ${fmtHrMinShort(weekTotalAvail) || '0'} / ${(weekTotalPaid / 60).toFixed(2)} t / ${(weekTotalPaid / 60).toFixed(2)} t`, cols[4], y + 2);
+      doc.text('Sum uke', colsF.avail - 22, y + 5.5);
+      doc.text(fmtHrMinShort(weekTotalAvail), colsF.avail, y + 5.5);
+      doc.text(fmtT(weekTotalPaid), colsF.arb, y + 5.5);
+      doc.text(fmtT(weekTotalPaid), colsF.lonn, y + 5.5);
     } else {
-      doc.text(`Sum uke: ${(weekTotalNet / 60).toFixed(2)} t`, cols[4] - 14, y + 2);
+      doc.text('Sum uke', colsN.lunsj, y + 5.5);
+      doc.text(fmtT(weekTotalNet), colsN.net, y + 5.5);
     }
-    doc.setFont('helvetica', 'normal');
-    y += 6;
-    if (footnotes.length > 0) {
-      doc.setFontSize(8);
-      doc.setTextColor(100, 116, 139);
-      [...new Set(footnotes)].forEach(fn => { doc.text(fn, margin, y); y += 4; });
-      doc.setFontSize(9);
-      doc.setTextColor(15, 23, 42);
+    y += 9;
+
+    if (footnotes.length) {
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(8); setText(C.muted);
+      [...new Set(footnotes)].forEach(fn => { ensure(4); doc.text(fn, M, y); y += 4; });
     }
     y += 4;
   });
 
-  // Tilleggsinformasjon
+  // ---------- Tilleggsinformasjon ----------
   const sections = [
     ['Årsak til turnusendring', formData.aarsak],
     ['Fagforbundets syn / forslag', formData.fagforbundetSyn],
     ['Annen kommentar', formData.annenKommentar],
   ].filter(([, v]) => v && v.trim());
 
-  if (sections.length) {
-    if (y > pageH - 80) { doc.addPage(); y = margin; }
-    sections.forEach(([k, v]) => {
-      if (y > pageH - 30) { doc.addPage(); y = margin; }
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(11);
-      doc.text(k, margin, y);
-      y += 5;
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(10);
-      const lines = doc.splitTextToSize(v, pageW - margin * 2);
-      lines.forEach(line => {
-        if (y > pageH - 25) { doc.addPage(); y = margin; }
-        doc.text(line, margin, y);
-        y += 5;
-      });
-      y += 4;
-    });
-  }
+  sections.forEach(([k, v]) => {
+    const lines = doc.splitTextToSize(v, contentW - 8);
+    ensure(12 + lines.length * 5);
+    setFill(C.primary); doc.roundedRect(M, y - 3.5, 1.6, 5, 0.8, 0.8, 'F');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(10.5); setText(C.dark);
+    doc.text(k, M + 5, y);
+    y += 6;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(10); setText(C.body);
+    lines.forEach(line => { ensure(5); doc.text(line, M + 5, y); y += 5; });
+    y += 5;
+  });
 
-  // Signatures (always at bottom of last page)
-  const sigY = pageH - 30;
-  if (y > sigY - 10) { doc.addPage(); }
-  const sigYFinal = pageH - 30;
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(10);
-  doc.text('Avdelingsleder: _______________________', margin, sigYFinal);
-  doc.text('Dato: ___________', margin, sigYFinal + 7);
-  doc.text('Tillitsvalgt / Fagforbundet: _______________________', pageW / 2, sigYFinal);
-  doc.text('Dato: ___________', pageW / 2, sigYFinal + 7);
+  // ---------- Signaturer ----------
+  ensure(36);
+  y = Math.max(y, FOOT - 32);
+  const boxW = (contentW - 8) / 2, boxH = 30;
+  [['Avdelingsleder', M], ['Tillitsvalgt / Fagforbundet', M + boxW + 8]].forEach(([label, bx]) => {
+    setDraw(C.line); setFill([255, 255, 255]); doc.setLineWidth(0.2);
+    doc.roundedRect(bx, y, boxW, boxH, 2, 2, 'FD');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8); setText(C.muted);
+    doc.text(label.toUpperCase(), bx + 4, y + 6);
+    setDraw(C.dark); doc.setLineWidth(0.3);
+    doc.line(bx + 4, y + 16, bx + boxW - 4, y + 16);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); setText(C.muted);
+    doc.text('Signatur', bx + 4, y + 19.5);
+    doc.line(bx + 4, y + 24, bx + boxW / 2 - 2, y + 24);
+    doc.text('Dato', bx + 4, y + 27.5);
+  });
 
-  // Page numbers
+  // ---------- Bunntekst ----------
+  const today = new Date();
+  const genStr = `${String(today.getDate()).padStart(2, '0')}.${String(today.getMonth() + 1).padStart(2, '0')}.${today.getFullYear()}`;
   const totalPages = doc.internal.getNumberOfPages();
   for (let p = 1; p <= totalPages; p++) {
     doc.setPage(p);
-    doc.setFontSize(9);
-    doc.setTextColor(100, 116, 139);
-    doc.text(`Side ${p} av ${totalPages}`, pageW - margin, pageH - 8, { align: 'right' });
+    setDraw(C.line); doc.setLineWidth(0.2);
+    doc.line(M, pageH - 12, pageW - M, pageH - 12);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8); setText(C.muted);
+    doc.text(`Generert ${genStr} · Turnusgenerator`, M, pageH - 7);
+    doc.text(`Side ${p} av ${totalPages}`, pageW - M, pageH - 7, { align: 'right' });
   }
 
-  const today = new Date();
   const dateStr = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
-  const filename = `Drøftingsnotat_${formData.avdeling || 'turnus'}_${dateStr}.pdf`;
+  const filename = `Drøftingsnotat_${(formData.avdeling || 'turnus').replace(/\s+/g, '_')}_${dateStr}.pdf`;
   doc.save(filename);
   return filename;
 }
