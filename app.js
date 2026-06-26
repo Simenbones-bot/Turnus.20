@@ -253,7 +253,11 @@ function initDefaults() {
   formData.avdeling = 'Bergen Distribusjon';
   formData.avdelingsleder = 'Ingrid Solheim';
   formData.typeTurnus = 'Personlig';
-  formData.ikrafttredelsesdato = '2026-07-01';
+  // Standard ikrafttredelsesdato: to uker frem i tid (lokal dato, format YYYY-MM-DD)
+  const ikraft = new Date();
+  ikraft.setDate(ikraft.getDate() + 14);
+  formData.ikrafttredelsesdato =
+    `${ikraft.getFullYear()}-${String(ikraft.getMonth() + 1).padStart(2, '0')}-${String(ikraft.getDate()).padStart(2, '0')}`;
 }
 function emptyWeek() { return [[], [], [], [], [], [], []]; }
 
