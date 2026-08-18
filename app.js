@@ -22,7 +22,8 @@ let formData = {
   rullerende: false,
   lastebil: false,
 };
-let fatsResult = { broken: [], warnings: [], shiftFlags: {}, weekFlags: {} };
+let regel = tomtRegelResultat();
+let forrigeBruddNokler = null;
 let lastSavedAt = null;
 
 const DAY_NAMES = ['Mandag', 'Tirsdag', 'Onsdag', 'Torsdag', 'Fredag', 'Lørdag', 'Søndag'];
@@ -228,15 +229,13 @@ function categorizeShift(weekIdx, dayIdx, shift) {
   return best;
 }
 
-// ====== Lunch & nettotid ======
-function lunchMinutes(grossMin) {
-  if (lastebil) {
-    if (grossMin > 540) return 45;
-    if (grossMin >= 360) return 30;
-    return 0;
-  }
-  return grossMin > 330 ? 30 : 0;
-}
+// ====== Regime, lunsj & nettotid ======
+// Spise-/hvilepauser over 15 min for sjåfører regnes ikke som arbeidstid,
+// jf. overenskomsten pkt. 4.1. Pauselengden følger AML § 10-9 (AML-regimet)
+// eller forskriften § 12 (FATS-regimet), og hentes fra regelverk.js slik at
+// planleggeren og regelkontrollen alltid regner likt.
+function regime() { return lastebil ? 'FATS' : 'AML'; }
+function lunchMinutes(grossMin) { return Regelverk.pause(grossMin, regime()); }
 function shiftGross(s) { return s.end - s.start; }
 function shiftNet(s) { return Math.max(0, shiftGross(s) - lunchMinutes(shiftGross(s))); }
 function availabilityMinutes(s) {
@@ -263,196 +262,48 @@ function migrateAllShifts() {
   weeks.forEach(w => w.forEach(day => day.forEach(ensureShiftDefaults)));
 }
 
-// ====== FATS validation ======
-function validateFATS() {
-  const result = {
-    broken: [], warnings: [], shiftFlags: {}, weekFlags: {},
-    reducedRest: {}, // `${wi}-${di}-${si}` -> { n, gapMin, broken }
-    reducedRestSummary: { total: 0, currentCount: 0, breached: 0 },
+// ====== Regelkontroll mot avtaleverket ======
+// Hele kontrollen ligger i regelverk.js, som koder overenskomsten og de to
+// særavtalene S2 om gjennomsnittsberegning. Her gjør vi bare kallet og varsler
+// om nye brudd.
+function tomtRegelResultat() {
+  return {
+    regime: 'AML', funn: [], brudd: [], advarsler: [], infoer: [],
+    sjekker: [], vaktFlagg: {}, ukeFlagg: {},
+    reduserteHviler: {}, reduserteOppsummering: { totalt: 0, brutt: 0, maks: 0 },
+    nokkeltall: {
+      antallUker: 0, sumNetto: 0, sumBrutto: 0, snittUke: 0,
+      basisTimer: 37.5, basisMin: 2250, redusertBasis: false, divisor: 1950,
+      stillingsprosent: 0, nattAndel: 0, hovedsakeligNatt: false,
+      antallSondager: 0, arbeidetSondager: 0, sondagsandel: 0, hverTredjeSondag: false,
+    },
   };
+}
 
-  // Overlap check — always runs, regardless of lastebil
-  weeks.forEach((week, wi) => {
-    week.forEach((day, di) => {
-      // Sort indices by start time so we only need consecutive checks
-      const sorted = day.map((s, si) => ({ s, si })).sort((a, b) => a.s.start - b.s.start);
-      const flagged = new Set();
-      for (let i = 0; i < sorted.length; i++) {
-        for (let j = i + 1; j < sorted.length; j++) {
-          const a = sorted[i].s, b = sorted[j].s;
-          if (a.start < b.end && b.start < a.end) {
-            const keyA = `${wi}-${di}-${sorted[i].si}`;
-            const keyB = `${wi}-${di}-${sorted[j].si}`;
-            result.shiftFlags[keyA] = 'broken';
-            result.shiftFlags[keyB] = 'broken';
-            if (!flagged.has(di)) {
-              flagged.add(di);
-              result.broken.push({
-                week: wi, dayIdx: di,
-                rule: 'overlap',
-                text: `Vakter på ${DAY_SHORT[di]} (uke ${weekMeta[wi].num}) overlapper hverandre`,
-              });
-            }
-          }
-        }
-      }
-    });
-  });
+function kjorRegelsjekk() {
+  regel = Regelverk.analyser({ weeks, weekMeta, regime: regime() });
+  varsleOmNyeBrudd();
+}
 
-  if (!lastebil) { fatsResult = result; return; }
-
-  weeks.forEach((week, wi) => {
-    let weekTotal = 0;
-
-    // Add cross-week Monday contribution from previous week's Sunday shift
-    if (wi > 0 && weeks[wi - 1]) {
-      (weeks[wi - 1][6] || []).forEach(s => {
-        if (s.end > TIMELINE_END) {
-          weekTotal += splitShiftAcrossWeeks(s, 6).nextWeekPaid;
-        }
-      });
+// Varsel med en gang en endring innfører et nytt brudd.
+// Nøkkelen er regel + uke, ikke teksten – et brudd som bare endrer tallverdi
+// er ikke et nytt brudd og skal ikke varsles på nytt.
+function varsleOmNyeBrudd() {
+  const nokler = regel.brudd.map(b => b.id + '|' + (b.uke === undefined ? '' : b.uke));
+  if (forrigeBruddNokler) {
+    const nye = nokler.filter(k => forrigeBruddNokler.indexOf(k) === -1);
+    if (nye.length) {
+      const forste = regel.brudd[nokler.indexOf(nye[0])];
+      toast('⚠ Nytt avtalebrudd: ' + (forste ? forste.tittel : nye.length + ' nye brudd'), 4500);
     }
-
-    // Rule 1: per-shift arbeidstid > 600 min (10h)
-    week.forEach((day, di) => {
-      day.forEach((s, si) => {
-        const paid = shiftPaid(s);
-        const split = splitShiftAcrossWeeks(s, di);
-        weekTotal += split.currentWeekPaid;
-        if (paid > 600) {
-          const key = `${wi}-${di}-${si}`;
-          result.shiftFlags[key] = 'broken';
-          result.broken.push({
-            week: wi, dayIdx: di,
-            rule: 'shift-10h',
-            text: `Vakt ${DAY_SHORT[di]} er ${(paid / 60).toFixed(1)} t arbeidstid (over 10 t)`,
-          });
-        }
-      });
-    });
-
-    // Rule 2: weekly arbeidstid > 3600 min (60h)
-    if (weekTotal > 3600) {
-      result.weekFlags[wi] = 'broken';
-      result.broken.push({
-        week: wi,
-        rule: 'week-60h',
-        text: `Sum uke ${weekMeta[wi].num}: ${(weekTotal / 60).toFixed(1)} t (over 60 t)`,
-      });
-      week.forEach((day, di) => {
-        day.forEach((_, si) => {
-          result.shiftFlags[`${wi}-${di}-${si}`] = 'broken';
-        });
-      });
-    }
-  });
-
-  // Rule 3: chronological reduced daily rest with counter (across all weeks)
-  // Build chronological list of all shifts as absolute minutes from start of turnus.
-  // For cross-week Sunday shifts (end > 1440), we DO NOT duplicate them — their
-  // absEnd already extends into next week's Monday in absolute terms.
-  const allShifts = [];
-  weeks.forEach((week, wi) => {
-    week.forEach((day, di) => {
-      day.forEach((s, si) => {
-        const base = (wi * 7 + di) * 1440;
-        allShifts.push({
-          key: `${wi}-${di}-${si}`,
-          wi, di, si,
-          absStart: base + s.start,
-          absEnd: base + s.end,
-        });
-      });
-    });
-  });
-  allShifts.sort((a, b) => a.absStart - b.absStart);
-
-  let counter = 0;
-  for (let i = 1; i < allShifts.length; i++) {
-    const prev = allShifts[i - 1];
-    const cur = allShifts[i];
-    const gap = cur.absStart - prev.absEnd;
-    if (gap >= 2700) {
-      // ≥ 45h: ukehvile — reset counter
-      counter = 0;
-      continue;
-    }
-    if (gap < 540) {
-      // Hard breach: < 9h rest
-      result.shiftFlags[cur.key] = 'broken';
-      result.broken.push({
-        week: cur.wi, dayIdx: cur.di,
-        rule: 'rest-9h',
-        text: `Hviletid før ${DAY_SHORT[cur.di]} (uke ${weekMeta[cur.wi].num}) er ${(gap / 60).toFixed(1)} t (under 9 t)`,
-      });
-      continue;
-    }
-    if (gap < 660) {
-      // 9–11h: reduced daily rest
-      counter += 1;
-      const broken = counter > 3;
-      result.reducedRest[cur.key] = { n: counter, gapMin: gap, broken };
-      result.reducedRestSummary.total += 1;
-      if (broken) {
-        result.shiftFlags[cur.key] = 'broken';
-        result.reducedRestSummary.breached += 1;
-        result.broken.push({
-          week: cur.wi, dayIdx: cur.di,
-          rule: 'rest-reduced',
-          text: `Den ${counter}. reduserte døgnhvilen siden forrige ukehvile før ${DAY_SHORT[cur.di]} (uke ${weekMeta[cur.wi].num}) — maks 3 tillatt`,
-        });
-      } else {
-        result.warnings.push({
-          week: cur.wi, dayIdx: cur.di,
-          rule: 'rest-reduced',
-          text: `Redusert døgnhvil ${counter}/3 før ${DAY_SHORT[cur.di]} (uke ${weekMeta[cur.wi].num}): ${(gap / 60).toFixed(1)} t`,
-        });
-      }
-    }
-    // gap >= 660: normal rest, no marker, counter unchanged
   }
-  result.reducedRestSummary.currentCount = counter;
+  forrigeBruddNokler = nokler;
+}
 
-  weeks.forEach((week, wi) => {
-
-    // Rule 4: largest gap in week >= 1440
-    const all = [];
-    week.forEach((day, di) => {
-      day.forEach(s => {
-        const absStart = di * 1440 + s.start;
-        const absEnd = isSundayCrossWeek(s, di)
-          ? 6 * 1440 + TIMELINE_END
-          : di * 1440 + s.end;
-        all.push({ s: absStart, e: absEnd });
-      });
-    });
-    if (wi > 0 && weeks[wi - 1]) {
-      (weeks[wi - 1][6] || []).forEach(s => {
-        if (s.end > TIMELINE_END) all.push({ s: 0, e: s.end - TIMELINE_END });
-      });
-    }
-    if (all.length >= 1) {
-      all.sort((a, b) => a.s - b.s);
-      // include rest before first shift and after last shift within the week
-      let maxGap = all[0].s; // gap from Mon 00:00 to first shift start
-      for (let i = 1; i < all.length; i++) {
-        const g = all[i].s - all[i - 1].e;
-        if (g > maxGap) maxGap = g;
-      }
-      const gapAfter = 7 * 1440 - all[all.length - 1].e; // gap from last shift end to Sun 23:59
-      if (gapAfter > maxGap) maxGap = gapAfter;
-      if (maxGap < 1440) {
-        if (!result.weekFlags[wi]) result.weekFlags[wi] = 'warn';
-        result.warnings.push({
-          week: wi,
-          rule: 'rest-24h',
-          text: `Uke ${weekMeta[wi].num}: lengste sammenhengende hviletid er ${(maxGap / 60).toFixed(1)} t`,
-        });
-      }
-    }
-  });
-
-  fatsResult = result;
+function esc(str) {
+  return String(str == null ? '' : str)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 // ====== Persistence ======
@@ -516,14 +367,14 @@ function emptyWeek() { return [[], [], [], [], [], [], []]; }
 
 // ====== Rendering ======
 function renderAll() {
-  validateFATS();
+  kjorRegelsjekk();
   syncFormToDOM();
   renderWeekTabs();
   renderDateRange();
   renderTimeline();
   renderDetailList();
   renderSummary();
-  renderFatsPanel();
+  renderRegelPanel();
   updateCompleteBadges();
   updatePdfState();
 }
@@ -557,8 +408,8 @@ function renderWeekTabs() {
     tab.type = 'button';
     tab.className = 'week-tab';
     if (i === activeWeek) tab.classList.add('active');
-    if (fatsResult.weekFlags[i] === 'broken') tab.classList.add('fats-broken');
-    if (fatsResult.weekFlags[i] === 'warn') tab.classList.add('fats-warn');
+    if (regel.ukeFlagg[i] === 'brudd') tab.classList.add('fats-broken');
+    if (regel.ukeFlagg[i] === 'advarsel') tab.classList.add('fats-warn');
     const yearSuffix = isRotasjon()
       ? ''
       : `<span class="tab-year mono">'${String(wm.year).slice(-2)}</span>`;
@@ -788,11 +639,11 @@ function availabilityStripesHtml(s, portionStart, portionEnd) {
 }
 function reducedRestBadgeHtml(key) {
   if (!lastebil) return '';
-  const info = fatsResult.reducedRest && fatsResult.reducedRest[key];
+  const info = regel.reduserteHviler && regel.reduserteHviler[key];
   if (!info) return '';
-  const cls = info.broken ? 'shift-rest-badge broken' : 'shift-rest-badge';
+  const cls = info.brudd ? 'shift-rest-badge broken' : 'shift-rest-badge';
   const hours = (info.gapMin / 60).toFixed(1).replace('.', ',');
-  const title = info.broken
+  const title = info.brudd
     ? `Dette er den ${info.n}. reduserte døgnhvilen siden forrige ukehvile — maks 3 tillatt. FATS-brudd.`
     : `Redusert døgnhvil ${info.n}/3 siden forrige ukehvile (${hours} timer fra forrige vakt)`;
   return `<span class="${cls}" title="${title}">9t</span>`;
@@ -833,7 +684,7 @@ function renderTimeline() {
     (weeks[activeWeek - 1][6] || []).forEach((s, si) => {
       if (s.end > TIMELINE_END) {
         const cat = categorizeShift(activeWeek - 1, 6, s);
-        const isBroken = fatsResult.shiftFlags[`${activeWeek - 1}-6-${si}`] === 'broken';
+        const isBroken = regel.vaktFlagg[`${activeWeek - 1}-6-${si}`] === 'brudd';
         prevWeekCrossConts.push({ si, cat, isBroken, s });
       }
     });
@@ -861,7 +712,7 @@ function renderTimeline() {
     // shifts
     week[di].forEach((s, si) => {
       const cat = categorizeShift(activeWeek, di, s);
-      const isBroken = fatsResult.shiftFlags[`${activeWeek}-${di}-${si}`] === 'broken';
+      const isBroken = regel.vaktFlagg[`${activeWeek}-${di}-${si}`] === 'brudd';
       const isSplit = s.end > TIMELINE_END;
 
       const shiftKey = `${activeWeek}-${di}-${si}`;
@@ -997,7 +848,7 @@ function renderDetailList() {
         totalNet += split.nextWeekNet;
         totalAvail += split.nextWeekAvail;
         totalPaid += split.nextWeekPaid;
-        const broken = fatsResult.shiftFlags[`${activeWeek - 1}-6-${si}`] === 'broken';
+        const broken = regel.vaktFlagg[`${activeWeek - 1}-6-${si}`] === 'brudd';
         const prevUkeNum = weekMeta[activeWeek - 1] ? weekMeta[activeWeek - 1].num : '?';
         rows.push({
           dayLabel: `${DAY_NAMES[6]}–${DAY_NAMES[0]}`,
@@ -1023,7 +874,7 @@ function renderDetailList() {
       totalNet += split.currentWeekNet;
       totalAvail += split.currentWeekAvail;
       totalPaid += split.currentWeekPaid;
-      const broken = fatsResult.shiftFlags[`${activeWeek}-${di}-${si}`] === 'broken';
+      const broken = regel.vaktFlagg[`${activeWeek}-${di}-${si}`] === 'brudd';
       const isSundayCW = isSundayCrossWeek(s, di);
       let dayLabel;
       if (isSundayCW) {
@@ -1140,13 +991,22 @@ function renderDetailList() {
 }
 
 function renderSummary() {
-  const totalMin = weeks.reduce((sum, w) => sum + w.reduce((s, day) => s + day.reduce((a, sh) => a + shiftPaid(sh), 0), 0), 0);
-  const numWeeks = weeks.length || 1;
-  const avgPerWeekMin = totalMin / numWeeks;
-  const pct = (avgPerWeekMin / 60) / 37.5 * 100;
+  const n = regel.nokkeltall;
+  const totalMin = n.sumNetto;
+  const avgPerWeekMin = n.snittUke;
+  const pct = n.stillingsprosent;
   document.getElementById('stat-uker').textContent = weeks.length;
   document.getElementById('stat-sum').textContent = (totalMin / 60).toFixed(1).replace('.', ',');
   document.getElementById('stat-snitt').textContent = (avgPerWeekMin / 60).toFixed(1).replace('.', ',');
+  const basisEl = document.getElementById('stat-basis');
+  if (basisEl) basisEl.textContent = String(n.basisTimer).replace('.', ',');
+  const basisNote = document.getElementById('stat-basis-note');
+  if (basisNote) {
+    basisNote.textContent = n.redusertBasis
+      ? (n.hverTredjeSondag ? 'Minst hver 3. søndag' : 'Hovedsakelig nattarbeid')
+      : '';
+    basisNote.hidden = !n.redusertBasis;
+  }
   const pctEl = document.getElementById('gauge-pct');
   pctEl.textContent = pct.toFixed(1).replace('.', ',') + '%';
   pctEl.classList.toggle('over', pct > 100);
@@ -1177,50 +1037,91 @@ function renderSummary() {
   needle.setAttribute('stroke', pct > 100 ? '#dc2626' : '#0f172a');
 }
 
-function renderFatsPanel() {
-  const panel = document.getElementById('fats-panel');
-  const list = document.getElementById('fats-list');
-  const counter = document.getElementById('fats-count');
-  const summary = fatsResult.reducedRestSummary || { total: 0, currentCount: 0, breached: 0 };
-  const showSummary = lastebil && summary.total > 0;
-  if (fatsResult.broken.length === 0 && fatsResult.warnings.length === 0 && !showSummary) {
-    panel.hidden = true;
-    return;
-  }
+function renderRegelPanel() {
+  const panel = document.getElementById('regel-panel');
+  if (!panel) return;
+  const list = document.getElementById('regel-list');
+  const counter = document.getElementById('regel-count');
+  const statusEl = document.getElementById('regel-status');
+  const basisEl = document.getElementById('regel-basis');
+  const kontrollEl = document.getElementById('regel-kontroll');
+
+  const antallBrudd = regel.brudd.length;
+  const antallVarsler = regel.advarsler.length;
   panel.hidden = false;
-  counter.textContent = `${fatsResult.broken.length} brudd · ${fatsResult.warnings.length} advarsler`;
+  panel.classList.toggle('har-brudd', antallBrudd > 0);
+  panel.classList.toggle('har-advarsel', antallBrudd === 0 && antallVarsler > 0);
+  panel.classList.toggle('er-ok', antallBrudd === 0 && antallVarsler === 0);
+
+  counter.textContent = antallBrudd
+    ? antallBrudd + ' brudd' + (antallVarsler ? ' · ' + antallVarsler + ' varsel' : '')
+    : (antallVarsler ? antallVarsler + ' varsel' : '✓ Ingen avvik');
+
+  statusEl.textContent = antallBrudd
+    ? 'Turnusen bryter avtaleverket. Rett opp punktene under før drøftingsnotatet sendes.'
+    : (antallVarsler
+        ? 'Ingen brudd, men punktene under bør være omforent i drøftingen.'
+        : 'Turnusen er innenfor overenskomsten og særavtalen.');
+
+  const n = regel.nokkeltall;
+  basisEl.textContent = (regel.regime === 'FATS'
+      ? 'FATS – forskrift om arbeidstid for sjåfører'
+      : 'AML – arbeidsmiljøloven')
+    + ' · beregningsgrunnlag ' + String(n.basisTimer).replace('.', ',') + ' t/uke';
+
   list.innerHTML = '';
 
-  if (showSummary) {
-    const isBreach = summary.currentCount > 3;
+  // Teller for reduserte døgnhviler – beholdt fra FATS-panelet
+  const red = regel.reduserteOppsummering || { totalt: 0, brutt: 0, maks: 0 };
+  if (regel.regime === 'FATS' && red.totalt > 0) {
     const div = document.createElement('div');
-    div.className = 'fats-item ' + (isBreach ? 'broken' : 'warn');
-    const usedLabel = Math.min(summary.currentCount, 3);
-    const status = isBreach
-      ? `<strong>FATS-brudd: ${summary.currentCount} reduserte døgnhviler siden forrige ukehvile (maks 3 tillatt)</strong><span>Totalt ${summary.total} reduserte døgnhviler i turnusen</span>`
-      : `<strong>Redusert døgnhvil brukt: ${usedLabel}/3</strong><span>Totalt ${summary.total} reduserte døgnhviler i turnusen siden forrige ukehvile</span>`;
-    div.innerHTML = `<span class="icon">⓵</span><div class="body">${status}</div>`;
+    const brutt = red.brutt > 0;
+    div.className = 'regel-item ' + (brutt ? 'brudd' : 'advarsel');
+    div.innerHTML = '<span class="icon">⓵</span><div class="body">' +
+      '<strong>Redusert døgnhvile: ' + Math.min(red.maks, 3) + '/3 brukt mellom to ukehviler</strong>' +
+      '<span>' + red.totalt + ' reduserte døgnhviler i rotasjonen' +
+      (brutt ? ', hvorav ' + red.brutt + ' over grensen på tre' : '') + '.</span>' +
+      '<span class="hjemmel">Kjøre- og hviletidsforordningen (EF) 561/2006 art. 8</span></div>';
     list.appendChild(div);
   }
 
-  const ruleTitle = {
-    'overlap': 'Overlappende vakter',
-    'shift-10h': 'Vakt over 10 timer',
-    'week-60h': 'Over 60 timer i uka',
-    'rest-9h': 'Hviletid under 9 timer',
-    'rest-11h': 'Hviletid under 11 timer',
-    'rest-reduced': 'Redusert døgnhvil',
-    'rest-24h': 'Mangler 24 t sammenhengende hvile',
-  };
-  const renderItem = (item, type) => {
+  if (!regel.funn.length) {
+    const tom = document.createElement('div');
+    tom.className = 'regel-tom';
+    tom.textContent = '✓ Alle kontrollpunkter er innenfor avtaleverket.';
+    list.appendChild(tom);
+  }
+
+  const ikon = { brudd: '⛔', advarsel: '⚠', info: 'ℹ' };
+  regel.funn.forEach(f => {
     const div = document.createElement('div');
-    div.className = 'fats-item ' + (type === 'broken' ? 'broken' : 'warn');
-    div.innerHTML = `<span class="icon">⚠</span><div class="body"><strong>Uke ${weekMeta[item.week].num} · ${ruleTitle[item.rule] || item.rule}</strong><span>${item.text}</span></div>`;
-    div.addEventListener('click', () => { activeWeek = item.week; renderAll(); });
+    div.className = 'regel-item ' + f.niva;
+    div.innerHTML =
+      '<span class="icon">' + ikon[f.niva] + '</span>' +
+      '<div class="body">' +
+        '<strong>' + (typeof f.uke === 'number' && weekMeta[f.uke] ? 'Uke ' + weekMeta[f.uke].num + ' · ' : '') + esc(f.tittel) + '</strong>' +
+        '<span>' + esc(f.tekst) + '</span>' +
+        '<span class="hjemmel">' + esc(f.hjemmel || '') + '</span>' +
+      '</div>';
+    if (typeof f.uke === 'number' && weeks[f.uke]) {
+      div.classList.add('klikkbar');
+      div.addEventListener('click', () => { activeWeek = f.uke; renderAll(); });
+    }
     list.appendChild(div);
-  };
-  fatsResult.broken.forEach(b => renderItem(b, 'broken'));
-  fatsResult.warnings.forEach(w => renderItem(w, 'warn'));
+  });
+
+  // Full kontrolliste – dokumenterer hva som faktisk er sjekket
+  if (kontrollEl) {
+    const merke = { ok: '✓', brudd: '⛔', advarsel: '⚠', na: '–' };
+    kontrollEl.innerHTML = regel.sjekker.map(k =>
+      '<div class="kontroll-rad ' + k.status + '">' +
+        '<span class="merke">' + merke[k.status] + '</span>' +
+        '<span class="navn">' + esc(k.navn) + '</span>' +
+        '<span class="verdi mono">' + esc(k.verdi) + '</span>' +
+        '<span class="grense">' + esc(k.grense) + '</span>' +
+        '<span class="hjemmel">' + esc(k.hjemmel) + '</span>' +
+      '</div>').join('');
+  }
 }
 
 function updateCompleteBadges() {
@@ -1835,7 +1736,12 @@ function generatePDF() {
      formData.typeTurnus === 'Personlig' ? (formData.navn || '–') : String(formData.antallSjaforer)],
     ['Ikrafttredelsesdato', formatDateNO(formData.ikrafttredelsesdato)],
     ['Rullerende turnus', formData.rullerende ? 'Ja' : 'Nei'],
-    ['Lastebil / FATS', formData.lastebil ? 'Ja' : 'Nei'],
+    ['Arbeidstidsregime', regel.regime === 'FATS' ? 'FATS – forskriften' : 'AML – arbeidsmiljøloven'],
+    ['Beregningsgrunnlag', String(regel.nokkeltall.basisTimer).replace('.', ',') + ' t/uke' +
+      (regel.nokkeltall.redusertBasis
+        ? (regel.nokkeltall.hverTredjeSondag ? ' (hver 3. søndag)' : ' (nattarbeid)')
+        : '')],
+    ['Gjennomsnittsperiode', weeks.length + ' uker (maks 16)'],
   ];
   const infoRows = Math.ceil(info.length / 2);
   const infoH = 12 + infoRows * 9;
@@ -1855,9 +1761,10 @@ function generatePDF() {
   y += infoH + 8;
 
   // ---------- Stillingsprosent-kort ----------
-  const totalMin = weeks.reduce((sum, w) => sum + w.reduce((s, day) => s + day.reduce((a, sh) => a + shiftPaid(sh), 0), 0), 0);
+  const totalMin = regel.nokkeltall.sumNetto;
   const numWeeks = weeks.length || 1;
-  const pct = (totalMin / numWeeks / 60 / 37.5) * 100;
+  const basisT = regel.nokkeltall.basisTimer;
+  const pct = regel.nokkeltall.stillingsprosent;
   const pctColor = pct > 100 ? C.red : (pct > 80 ? C.amber : C.green);
   const cardH = 30;
   setFill([255, 255, 255]); setDraw(C.line);
@@ -1868,7 +1775,7 @@ function generatePDF() {
   doc.text(pct.toFixed(1).replace('.', ',') + ' %', M + 6, y + 21);
   doc.setFont('helvetica', 'normal'); doc.setFontSize(8); setText(C.muted);
   doc.text(`${weeks.length} uker  ·  ${(totalMin / 60).toFixed(1).replace('.', ',')} t totalt`, pageW - M - 6, y + 8, { align: 'right' });
-  doc.text(`Snitt ${(totalMin / numWeeks / 60).toFixed(1).replace('.', ',')} t/uke av 37,5 t`, pageW - M - 6, y + 13, { align: 'right' });
+  doc.text(`Snitt ${(totalMin / numWeeks / 60).toFixed(1).replace('.', ',')} t/uke av ${String(basisT).replace('.', ',')} t`, pageW - M - 6, y + 13, { align: 'right' });
   const barX = M + 70, barW = contentW - 70 - 6, barY = y + 19, barH = 5;
   setFill(C.panel); doc.roundedRect(barX, barY, barW, barH, 1, 1, 'F');
   const fillW = Math.max(1.5, Math.min(barW, (Math.min(pct, 130) / 130) * barW));
@@ -2027,6 +1934,97 @@ function generatePDF() {
     y += 4;
   });
 
+  // ---------- Regelkontroll mot avtaleverket ----------
+  const antallBrudd = regel.brudd.length;
+  const antallVarsler = regel.advarsler.length;
+
+  ensure(46);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(13); setText(C.dark);
+  doc.text('Regelkontroll mot avtaleverket', M, y);
+  y += 5;
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); setText(C.muted);
+  const grunnlag = 'Kontrollert mot Overenskomst PBV–Fagforbundet Del B (1.4.2026–31.3.2028) og Særavtale S2 om ' +
+    'gjennomsnittsberegning av alminnelig arbeidstid (' + regel.regime + '), gjeldende fra 01.04.2026. ' +
+    'Turnusen er vurdert som rullerende, slik at siste uke etterfølges av første uke.';
+  doc.splitTextToSize(grunnlag, contentW).forEach(l => { doc.text(l, M, y); y += 3.4; });
+  y += 3;
+
+  // Statusbanner
+  ensure(16);
+  const bannerFarge = antallBrudd ? C.red : C.green;
+  setFill(antallBrudd ? [254, 226, 226] : [220, 252, 231]);
+  setDraw(bannerFarge); doc.setLineWidth(0.3);
+  doc.roundedRect(M, y, contentW, 11, 2, 2, 'FD');
+  setText(antallBrudd ? [153, 27, 27] : [22, 101, 52]);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5);
+  doc.text(antallBrudd
+    ? 'BRUDD PÅ AVTALEVERKET: ' + antallBrudd + ' forhold må rettes før turnusen kan iverksettes'
+    : (antallVarsler
+        ? 'Ingen brudd. ' + antallVarsler + ' forhold bør være omforent i drøftingen.'
+        : 'Ingen brudd på kontrollerte punkter i overenskomsten og særavtalen.'),
+    M + 4, y + 7);
+  y += 16;
+
+  // Kontrolliste
+  const kCols = [M + 2, M + 82, M + 122, contentW + M - 2];
+  ensure(12);
+  setFill(C.panel); doc.rect(M, y, contentW, 6, 'F');
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); setText(C.muted);
+  doc.text('KONTROLLPUNKT', kCols[0], y + 4);
+  doc.text('MÅLT', kCols[1], y + 4);
+  doc.text('GRENSE', kCols[2], y + 4);
+  doc.text('STATUS', kCols[3], y + 4, { align: 'right' });
+  y += 6;
+  const statusTekst = { ok: 'OK', brudd: 'BRUDD', advarsel: 'VARSEL', na: 'Ikke aktuelt' };
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8);
+  regel.sjekker.forEach((k, i) => {
+    const celler = [
+      doc.splitTextToSize(k.navn, 78),
+      doc.splitTextToSize(String(k.verdi || '–'), 38),
+      doc.splitTextToSize(String(k.grense || '–'), 34),
+    ];
+    const linjer = Math.max(celler[0].length, celler[1].length, celler[2].length);
+    const radH = linjer * 3.6 + 2.4;
+    ensure(radH + 2);
+    if (i % 2 === 1) { setFill(C.zebra); doc.rect(M, y - 1, contentW, radH, 'F'); }
+    setText(k.status === 'brudd' ? C.red : (k.status === 'advarsel' ? C.amber : C.body));
+    celler.forEach((celle, ci) => celle.forEach((l, li) => doc.text(l, kCols[ci], y + 2.4 + li * 3.6)));
+    doc.setFont('helvetica', 'bold');
+    doc.text(statusTekst[k.status] || k.status, kCols[3], y + 2.4, { align: 'right' });
+    doc.setFont('helvetica', 'normal');
+    y += radH;
+  });
+  y += 6;
+
+  // Avvik med hjemmel
+  if (regel.funn.length) {
+    ensure(20);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(10.5); setText(C.dark);
+    doc.text('Avvik og merknader', M, y);
+    y += 5;
+    const merkelapp = { brudd: 'BRUDD', advarsel: 'VARSEL', info: 'MERKNAD' };
+    regel.funn.forEach(f => {
+      ensure(18);
+      const farge = f.niva === 'brudd' ? C.red : (f.niva === 'advarsel' ? C.amber : C.muted);
+      setFill(farge); doc.rect(M, y - 2.6, 1.2, 4, 'F');
+      setText(farge);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(8);
+      const tittel = merkelapp[f.niva] + ' · ' +
+        (typeof f.uke === 'number' && weekMeta[f.uke] ? 'Uke ' + weekMeta[f.uke].num + ' · ' : '') + f.tittel;
+      doc.splitTextToSize(tittel, contentW - 5).forEach(l => { doc.text(l, M + 4, y); y += 3.6; });
+      doc.setFont('helvetica', 'normal'); setText(C.body);
+      doc.splitTextToSize(f.tekst, contentW - 5).forEach(l => { ensure(10); doc.text(l, M + 4, y); y += 3.6; });
+      if (f.hjemmel) {
+        setText(C.muted); doc.setFontSize(7);
+        doc.splitTextToSize('Hjemmel: ' + f.hjemmel, contentW - 5).forEach(l => { ensure(10); doc.text(l, M + 4, y); y += 3.2; });
+        doc.setFontSize(8);
+      }
+      y += 2.5;
+    });
+    y += 4;
+  }
+  setText(C.dark);
+
   // ---------- Tilleggsinformasjon ----------
   const sections = [
     ['Årsak til turnusendring', formData.aarsak],
@@ -2097,7 +2095,24 @@ function hardReset() {
   weekMeta = [{ num: first.num, year: first.year }];
   weeks = [emptyWeek()];
   activeWeek = 0;
-  fatsResult = { broken: [], warnings: [], shiftFlags: {}, weekFlags: {} };
+  regel = tomtRegelResultat();
+  forrigeBruddNokler = null;
+}
+
+// ====== Eksport med regelkontroll ======
+// Brudd stopper ikke eksporten – notatet skal kunne brukes i drøftingen –
+// men de må bekreftes, og de dokumenteres i notatet.
+function eksporterMedKontroll(fortsett) {
+  const brudd = regel.brudd;
+  if (!brudd.length) { fortsett(); return; }
+  const liste = brudd.slice(0, 4).map(f => '• ' + f.tittel).join('\n') +
+    (brudd.length > 4 ? '\n• … og ' + (brudd.length - 4) + ' til' : '');
+  confirmDialog(
+    brudd.length + ' brudd på avtaleverket',
+    'Turnusen bryter overenskomsten/særavtalen:\n' + liste +
+    '\n\nBruddene blir listet opp i drøftingsnotatet. Vil du fortsette?',
+    fortsett
+  );
 }
 
 // ====== PDF action wiring ======
@@ -2111,21 +2126,11 @@ function wireGlobalClose() {
 
 function wireActions() {
   document.getElementById('btn-pdf').addEventListener('click', () => {
-    const tryPdf = () => generatePDF();
-    if (lastebil && fatsResult.broken.length > 0) {
-      confirmDialog(
-        'FATS-brudd oppdaget',
-        `Turnusen har ${fatsResult.broken.length} FATS-brudd. Er du sikker på at du vil generere drøftingsnotatet?`,
-        tryPdf
-      );
-    } else {
-      tryPdf();
-    }
+    eksporterMedKontroll(() => generatePDF());
   });
 
   document.getElementById('btn-email').addEventListener('click', () => {
-    const filename = generatePDF();
-    showEmailModal(filename);
+    eksporterMedKontroll(() => showEmailModal(generatePDF()));
   });
 
   document.getElementById('btn-print').addEventListener('click', () => {

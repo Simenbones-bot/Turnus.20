@@ -692,53 +692,130 @@ input, select, textarea, button { font-family: inherit; font-size: inherit; colo
   color: #fff;
 }
 
-.fats-panel {
+.regel-panel {
   background: var(--color-surface);
   border-radius: var(--radius);
   box-shadow: var(--shadow-sm);
   padding: 16px;
+  border-top: 3px solid var(--color-success);
 }
-.fats-head {
+.regel-panel.har-brudd { border-top-color: var(--color-danger); }
+.regel-panel.har-advarsel { border-top-color: var(--color-warning); }
+.regel-head {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 8px;
 }
-.fats-head h4 { margin: 0; font-size: 14px; font-weight: 600; }
-.fats-count {
-  background: var(--color-danger-light);
-  color: var(--color-danger);
+.regel-titles h4 { margin: 0; font-size: 14px; font-weight: 600; }
+.regel-titles small {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+.regel-count {
+  flex-shrink: 0;
   font-size: 11px;
   font-weight: 600;
   padding: 3px 8px;
   border-radius: 999px;
+  background: var(--color-success-light);
+  color: #166534;
 }
-.fats-list { display: flex; flex-direction: column; gap: 8px; }
-.fats-item {
+.har-brudd .regel-count { background: var(--color-danger-light); color: var(--color-danger); }
+.har-advarsel .regel-count { background: var(--color-warning-light); color: #92400e; }
+.regel-status {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+.regel-list { display: flex; flex-direction: column; gap: 8px; }
+.regel-tom {
+  font-size: 12px;
+  color: #166534;
+  background: var(--color-success-light);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+}
+.regel-item {
   display: flex;
   gap: 10px;
   padding: 10px 12px;
   border-radius: var(--radius-sm);
-  cursor: pointer;
   align-items: flex-start;
   font-size: 12px;
   border: 1px solid transparent;
 }
-.fats-item:hover { border-color: currentColor; }
-.fats-item.broken {
-  background: var(--color-danger-light);
-  color: var(--color-danger);
+.regel-item.klikkbar { cursor: pointer; }
+.regel-item.klikkbar:hover { border-color: currentColor; }
+.regel-item.brudd { background: var(--color-danger-light); color: var(--color-danger); }
+.regel-item.advarsel { background: var(--color-warning-light); color: var(--color-warning); }
+.regel-item.info { background: var(--color-bg); color: var(--color-text-muted); }
+.regel-item .icon { flex-shrink: 0; }
+.regel-item .body { color: var(--color-text); display: flex; flex-direction: column; gap: 2px; }
+.regel-item .body strong { font-weight: 600; color: inherit; }
+.regel-item.brudd .body { color: #7f1d1d; }
+.regel-item.advarsel .body { color: #78350f; }
+.regel-item .hjemmel {
+  font-size: 10.5px;
+  opacity: 0.75;
+  font-style: italic;
 }
-.fats-item.warn {
-  background: var(--color-warning-light);
+
+.regel-kontroll-wrap {
+  margin-top: 14px;
+  border-top: 1px solid var(--color-border);
+  padding-top: 10px;
+}
+.regel-kontroll-wrap summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+.regel-kontroll-wrap summary:hover { color: var(--color-text); }
+.regel-kontroll { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.kontroll-rad {
+  display: grid;
+  grid-template-columns: 16px 1fr auto;
+  gap: 2px 8px;
+  font-size: 11.5px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--color-border);
+}
+.kontroll-rad:last-child { border-bottom: none; }
+.kontroll-rad .merke { grid-row: span 2; color: var(--color-success); font-weight: 700; }
+.kontroll-rad.brudd .merke { color: var(--color-danger); }
+.kontroll-rad.advarsel .merke { color: var(--color-warning); }
+.kontroll-rad.na .merke { color: var(--color-text-muted); }
+.kontroll-rad .navn { font-weight: 600; }
+.kontroll-rad .verdi { text-align: right; white-space: nowrap; }
+.kontroll-rad .grense,
+.kontroll-rad .hjemmel {
+  grid-column: 2 / -1;
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+}
+.kontroll-rad .hjemmel { font-style: italic; }
+
+.regel-kilde {
+  margin: 12px 0 0;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--color-text-muted);
+}
+
+.stat-note {
+  display: block;
+  font-size: 10px;
+  font-style: normal;
   color: var(--color-warning);
+  margin-top: 2px;
 }
-.fats-item .icon { flex-shrink: 0; }
-.fats-item .body strong { display: block; font-weight: 600; }
-.fats-item .body { color: var(--color-text); }
-.fats-item.broken .body { color: #7f1d1d; }
-.fats-item.warn .body { color: #78350f; }
-.fats-item .body strong { color: inherit; }
+
+#confirm-text { white-space: pre-line; }
 
 .action-card {
   background: var(--color-surface);

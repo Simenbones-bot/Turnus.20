@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20260629" />
+<link rel="stylesheet" href="style.css?v=20260818" />
 </head>
 <body>
 
@@ -99,8 +99,8 @@
             <input type="checkbox" id="f-lastebil" />
             <span class="toggle-track"><span class="toggle-thumb"></span></span>
             <span class="toggle-text">
-              <strong>Lastebil (FATS-regler)</strong>
-              <small>Kjøre- og hviletidsforordningen</small>
+              <strong>Yrkessjåfør – FATS</strong>
+              <small>På: forskriften om arbeidstid for sjåfører og særavtale S2 (FATS).<br>Av: arbeidsmiljøloven og særavtale S2 (AML).</small>
             </span>
           </label>
         </div>
@@ -142,7 +142,7 @@
 
       <div class="detail-list" id="detail-list"></div>
 
-      <p class="hint">FATS-validering kjører automatisk etter hver endring. Brudd vises i panelet til høyre.</p>
+      <p class="hint">Regelkontrollen mot overenskomsten og særavtalene kjører automatisk etter hver endring. Brudd og varsler vises i panelet til høyre.</p>
     </section>
 
     <!-- SECTION 3 -->
@@ -186,7 +186,7 @@
         <div><small>ANTALL UKER</small><strong class="mono"><span id="stat-uker">0</span> uker</strong></div>
         <div><small>SUM TIMER</small><strong class="mono"><span id="stat-sum">0</span> t</strong></div>
         <div><small>SNITT / UKE</small><strong class="mono"><span id="stat-snitt">0</span> t</strong></div>
-        <div><small>FULL STILLING</small><strong class="mono">37,5 t/uke</strong></div>
+        <div><small>BEREGNINGSGRUNNLAG</small><strong class="mono"><span id="stat-basis">37,5</span> t/uke</strong><em class="stat-note" id="stat-basis-note" hidden></em></div>
       </div>
 
       <div class="gauge-scale">
@@ -195,12 +195,25 @@
       </div>
     </div>
 
-    <div class="fats-panel" id="fats-panel" hidden>
-      <div class="fats-head">
-        <h4>FATS / AKT-validering</h4>
-        <span class="fats-count" id="fats-count">0 brudd</span>
+    <div class="regel-panel er-ok" id="regel-panel">
+      <div class="regel-head">
+        <div class="regel-titles">
+          <h4>Regelkontroll</h4>
+          <small id="regel-basis">AML · beregningsgrunnlag 37,5 t/uke</small>
+        </div>
+        <span class="regel-count" id="regel-count">✓ Ingen avvik</span>
       </div>
-      <div class="fats-list" id="fats-list"></div>
+      <p class="regel-status" id="regel-status"></p>
+      <div class="regel-list" id="regel-list"></div>
+      <details class="regel-kontroll-wrap">
+        <summary>Alle kontrollpunkter</summary>
+        <div class="regel-kontroll" id="regel-kontroll"></div>
+      </details>
+      <p class="regel-kilde">
+        Kontrollert mot Overenskomst PBV–Fagforbundet Del B (1.4.2026–31.3.2028) og særavtalene S2 om
+        gjennomsnittsberegning av alminnelig arbeidstid (AML og FATS), gjeldende fra 01.04.2026.
+        Turnusen vurderes som rullerende.
+      </p>
     </div>
 
     <div class="action-card">
@@ -227,7 +240,7 @@
 
 <footer class="site-footer">
   <span>© Turnusgenerator · Drøftingsverktøy</span>
-  <span class="mono">Versjon 1.0</span>
+  <span class="mono">Versjon 1.1 · avtaleverk S2 (01.04.2026)</span>
 </footer>
 
 <!-- Modal: edit shift on mobile -->
@@ -262,6 +275,7 @@
 <div id="toast" class="toast" hidden></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script src="app.js?v=20260629"></script>
+<script src="regelverk.js?v=20260818"></script>
+<script src="app.js?v=20260818"></script>
 </body>
 </html>
